@@ -53,14 +53,18 @@ class SARProcessor:
 
         self.read_fino_file()
         for file in files:
-            self.read_file(file)
-            self.obtain_target_tile()
-            self.filter_objects(num_guard=20, num_ref=20, pfa=1e-3)
-            self.compute_welch_2D(tile_size=(128, 128), overlap=0.5, window='hamming', return_db=True)
-            self.compute_fft_2D()
-            self.get_closest_measurement()
-            del self.ds
-            self.write_pickle(os.path.basename(file).split('.')[0])
+            print(f'Processing file {file}')
+            try:
+                self.read_file(file)
+                self.obtain_target_tile()
+                self.filter_objects(num_guard=20, num_ref=20, pfa=1e-3)
+                self.compute_welch_2D(tile_size=(128, 128), overlap=0.5, window='hamming', return_db=True)
+                self.compute_fft_2D()
+                self.get_closest_measurement()
+                del self.ds
+                self.write_pickle(os.path.basename(file).split('.')[0])
+            except:
+                print(f'Couldnt process file {file}')
 
     def write_pickle(self,filename):
         path = os.path.join(self.dst_path,filename+'.pkl')
@@ -308,8 +312,8 @@ class SARProcessor:
         dx = np.abs(np.diff(self.tile[dim_x].values)[0])
 
         # Assumed values
-        dy = 22
-        dx = 3.1
+        dy = self.tile.metadata.attrs['Abstracted_Metadata:azimuth_spacing']
+        dx = self.tile.metadata.attrs['Abstracted_Metadata:range_spacing']
 
         # 2D FFT computation
         fft_vals = np.fft.fftshift(np.fft.fft2(da_filled- np.mean(da_filled)))
@@ -373,8 +377,8 @@ class SARProcessor:
         dx = np.abs(np.diff(self.tile[dim_x].values)[0])
         
         # Assumed values
-        dy = 22
-        dx = 3.1
+        dy = self.tile.metadata.attrs['Abstracted_Metadata:azimuth_spacing']
+        dx = self.tile.metadata.attrs['Abstracted_Metadata:range_spacing']
 
         # 3. Calculate step sizes based on overlap percentage
         step_y = max(1, int(ty * (1.0 - overlap)))
