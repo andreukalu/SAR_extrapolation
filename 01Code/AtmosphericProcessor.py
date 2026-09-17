@@ -22,16 +22,16 @@ class AtmosphericProcessor:
         
         # Interpolate variables between the two altitudes z1 and z2
         if self.z1 == 0: # Special case when z1 is 0, we set the values at z1 to 0 for wind speed and 98% for relative humidity
-            self.internal_df[f"WSPD_z1"] = 0.0  # Set wind speed at sea level to 0 m/s
-            self.internal_df[f"RELH_z1"] = 98.0  # Set relative humidity at sea level to 98%
+            self.internal_df["WSPD_z1"] = 0.0  # Set wind speed at sea level to 0 m/s
+            self.internal_df["RELH_z1"] = 98.0  # Set relative humidity at sea level to 98%
         else:
-            self.internal_df[[f"WSPD_z1"]] = self.interpolate_variable('WSPD', self.z1)
-            self.internal_df[[f"RELH_z1"]] = self.interpolate_variable('RELH', self.z1)
+            self.internal_df[["WSPD_z1"]] = self.interpolate_variable('WSPD', self.z1)
+            self.internal_df[["RELH_z1"]] = self.interpolate_variable('RELH', self.z1)
 
-        self.internal_df[f"WSPD_z2"] = self.internal_df[self.z2_var_name]  # Set wind speed at z2 to the closest available value
-        self.internal_df[f"RELH_z2"] = self.interpolate_variable('RELH', self.z2_closest)
-        self.internal_df[[f"TEMP_z1",f"TEMP_z2"]] = self.interpolate_variable('DRYT', [self.z1, self.z2_closest])
-        self.internal_df[[f"ATMP_z1",f"ATMP_z2"]] = self.interpolate_variable('ATMP', [self.z1, self.z2_closest])
+        self.internal_df["WSPD_z2"] = self.internal_df[self.z2_var_name]  # Set wind speed at z2 to the closest available value
+        self.internal_df["RELH_z2"] = self.interpolate_variable('RELH', self.z2_closest)
+        self.internal_df[["TEMP_z1","TEMP_z2"]] = self.interpolate_variable('DRYT', [self.z1, self.z2_closest])
+        self.internal_df[["ATMP_z1","ATMP_z2"]] = self.interpolate_variable('ATMP', [self.z1, self.z2_closest])
         
         self.convert_to_kelvin()  # Convert temperature to Kelvin
         self.convert_to_pascal()  # Convert pressure to Pascal
@@ -144,7 +144,7 @@ class AtmosphericProcessor:
         Ri = np.array([self.bulk_Richardson_number(T1[i], RH1[i], T2[i], RH2[i], P1[i], P2[i], U1[i], U2[i]) for i in range(len(T1))])
 
         # Add the bulk Richardson number to the internal DataFrame
-        self.internal_df[f"Ri_{int(self.z1)}m_{int(self.z2)}m"] = Ri
+        self.internal_df["Ri"] = Ri
 
         return self.internal_df
 
@@ -241,6 +241,48 @@ class AtmosphericProcessor:
         )
         
         self.internal_df[f"wind_shear_exponent"] = wind_shear_exponents
+        
+        return self.internal_df
+
+    def compute_Obukhov_length(self):
+        """
+        Compute the Obukhov length.
+
+        Returns:
+        L : np.ndarray
+            Obukhov length for each time step.
+        """
+
+        print(f"Computing Obukhov length...")
+
+        # Extract the necessary variables from the internal DataFrame
+        Ri = self.internal_df["Ri"].values
+
+        # Calculate the bulk Richardson number for each time step
+        L = np.array([self.obukhov_length(Ri[i], self.z2, self.z1) for i in range(len(Ri))])
+
+        # Add the Obukhov length to the internal DataFrame
+        self.internal_df["L"] = L
+
+        return self.internal_df
+    
+    def obukhov_length(self, Ri, z2, z1):
+        """
+        Function to compute the Obukhov length from the richardson number
+        """
+
+        # Reference height (geometric mean is often preferred, but arithmetic mean works well)
+        z_p = (z2 + z1) / 2.0
+        
+        if Ri <= 0:
+            eta = 10*Ri
+        elif (Ri > 0) and (Ri < 0.2):
+            eta = 10*Ri/(1-5*Ri)
+        else:
+            eta = np.nan
+
+        # Compute the Obukhov length L at the reference height
+        return z_p / eta if not np.isnan(eta) else np.nan
 
     def virtual_potential_temperature(self, T, RH, P):
         """

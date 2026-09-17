@@ -4,6 +4,8 @@ import pandas as pd
 import netCDF4 as nc
 import numpy as np
 import os
+import glob
+import AtmosphericProcessor
 
 # File Processor Class
 class FileProcessor:
@@ -14,6 +16,12 @@ class FileProcessor:
         self.dst_path = dst_path  # Destination path for output files
 
     ######### Methods ##################################
+    def read_files(self):
+        files = glob.glob(os.path.join(self.src_path,'*.nc'))
+
+        for file in files:
+            self.read_netcdf(file)
+
     def read_netcdf(self, file_name):
         """
         Read a NetCDF file and return a DataFrame containing the data."""
@@ -79,13 +87,27 @@ class FileProcessor:
             anchor_date = pd.Timestamp("2016-01-01")
             first_value = data_df["TIME"].iloc[0]
 
-            # 2. Subtract the starting offset to get relative elapsed days, then convert to Timedelta
+            # Subtract the starting offset to get relative elapsed days, then convert to Timedelta
             data_df["TIME"] = anchor_date + pd.to_timedelta(
                 data_df["TIME"] - first_value, unit="D"
             )
 
-            # 3. (Optional) Round to nearest minute to clean up floating point imprecision
+            # Round to nearest minute to clean up floating point imprecision
             data_df["TIME"] = data_df["TIME"].dt.round("min")
+
+            # Check if temperature at 0 m by the metmast is valid, and remove it if not
+            if data_df['TEMP_0m'].mean() < -20:
+                data_df = data_df.drop(columns=['TEMP_0m'])
+
+            # Check if a dataframe is existent and update it with the new one
+            if getattr(self, "df", None) is not None:
+                if self.df.shape[0] >= data_df.shape[0]:
+                    self.df = pd.merge_asof(self.df, data_df, on='TIME', direction='backward')
+                else:
+                    self.df = pd.merge_asof(data_df, self.df, on='TIME', direction='backward')
+            else:
+                self.df = data_df
+
         return data_df
 
     def read_netcdf_variable(self, file_name, variable_name):
@@ -124,7 +146,18 @@ class FileProcessor:
             var_info = {var: (dataset.variables[var].dimensions, dataset.variables[var].shape) for var in dataset.variables}
         print(var_info)
 
-    def write_pickle(self, data_df, file_name):
+    def compute_atmospheric_parameters(self,z2=34,z1=0):
+        ap = AtmosphericProcessor.AtmosphericProcessor(self.df,z2,z1)
+
+        ap.compute_bulk_Richardson_number()
+        ap.compute_wind_shear_exponent()
+        ap.compute_Obukhov_length()
+
+        self.df = ap.internal_df
+
+        return self.df
+
+    def write_pickle(self, file_name):
         """
         Write a DataFrame to a pickle file.
 
@@ -135,4 +168,4 @@ class FileProcessor:
             Name of the output pickle file.
         """
         print(f"Writing pickle file: {self.dst_path}/{file_name}")
-        data_df.to_pickle(f"{os.path.join(self.dst_path, file_name)}")
+        self.df.to_pickle(f"{os.path.join(self.dst_path, file_name)}")

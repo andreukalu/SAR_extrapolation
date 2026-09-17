@@ -5,13 +5,16 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import pandas as pd
 from scipy.ndimage import uniform_filter, maximum_filter
+import glob
+import pickle
 
 import numpy as np
 
 class SARProcessor:
 
-    def __init__(self,sar_src_path,sar_file_name='',fino_src_path=None,lat=0,lon=0,width=0.5,height=0.5):
+    def __init__(self,sar_src_path,dst_path='',sar_file_name='',fino_src_path=None,lat=0,lon=0,width=0.5,height=0.5):
         self.src_path = sar_src_path
+        self.dst_path = dst_path
         self.file_name = sar_file_name
         self.file_path = os.path.join(sar_src_path,sar_file_name)
 
@@ -44,8 +47,34 @@ class SARProcessor:
                 var_info = {var: (dataset.variables[var].dimensions, dataset.variables[var].shape) for var in dataset.variables}
             print(var_info)
 
-    def read_file(self):
-        self.ds = xr.open_dataset(self.file_path)
+    def process_files(self):
+        
+        files = glob.glob(os.path.join(self.src_path,'*.nc'))
+
+        self.read_fino_file()
+        for file in files:
+            self.read_file(file)
+            self.obtain_target_tile()
+            self.filter_objects(num_guard=20, num_ref=20, pfa=1e-3)
+            self.compute_welch_2D(tile_size=(128, 128), overlap=0.5, window='hamming', return_db=True)
+            self.compute_fft_2D()
+            self.get_closest_measurement()
+            del self.ds
+            self.write_pickle(os.path.basename(file).split('.')[0])
+
+    def write_pickle(self,filename):
+        path = os.path.join(self.dst_path,filename+'.pkl')
+
+        # Add psd to the tile
+        self.tile['psd'] = self.psd
+        with open(path, 'wb') as f:
+            pickle.dump(self.tile, f)
+             
+    def read_file(self, file_path=''):
+        if file_path == '':
+            self.ds = xr.open_dataset(self.file_path)
+        else:
+            self.ds = xr.open_dataset(file_path)
 
         return self.ds
 
@@ -556,9 +585,9 @@ class SARProcessor:
 
             plot.set_clim(clim_low,clim_high)
 
-        if 'Ri_0m_34m' in self.tile:
+        if 'Ri' in self.tile:
             plt.gca().text(
-                0.05, 0.92, f'bRi: {self.tile.Ri_0m_34m.item():.3f}', 
+                0.05, 0.92, f'bRi: {self.tile.Ri.item():.3f}', 
                 transform=plt.gca().transAxes, 
                 color='white', bbox=dict(facecolor='black', alpha=0.6)
             )
@@ -569,4 +598,11 @@ class SARProcessor:
                         transform=plt.gca().transAxes, 
                         color='white', bbox=dict(facecolor='black', alpha=0.6)
                     )
+
+        if 'L' in self.tile:
+                            plt.gca().text(
+                                0.05, 0.72, f'L: {self.tile.L.item():.3f}', 
+                                transform=plt.gca().transAxes, 
+                                color='white', bbox=dict(facecolor='black', alpha=0.6)
+                            )
 
