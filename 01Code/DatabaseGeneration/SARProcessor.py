@@ -80,6 +80,12 @@ class SARProcessor:
         else:
             self.ds = xr.open_dataset(os.path.join(self.src_path,file_path))
 
+        # Add icident angle and platform heading for easy access
+        self.ds['incident_angle'] = self.ds['incident_angle']
+        self.ds['platform_heading'] = [
+            val for key, val in self.ds.metadata.attrs.items() if key.endswith("platformHeading")
+        ]
+        self.ds['platform_heading'] = self.ds['platform_heading'][0]
         return self.ds
 
     def read_fino_file(self):
@@ -625,6 +631,7 @@ class SARProcessor:
         Returns:
             CMOD5_N: Normalized backscatter sigma0 (linear scale)
         """
+
         # 1-based indexing added to match Fortran C(1) .. C(28)
         C = np.array(
             [
