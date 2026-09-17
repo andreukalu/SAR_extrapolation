@@ -40,3 +40,7 @@ Thumbs.db
 ###################
 01Code/download_SLC_data.py
 01Code/download_SLC_data.ipynb
+01Code/__pycache__/
+01Code/test.ipynb
+01Code/test_SAR_process.ipynb
+01Code/token
