@@ -73,6 +73,19 @@ class FileProcessor:
             else:
                 data_df = pd.DataFrame()
 
+            # Set the time index as column and change the type to datetime
+            data_df = data_df.reset_index()
+
+            anchor_date = pd.Timestamp("2016-01-01")
+            first_value = data_df["TIME"].iloc[0]
+
+            # 2. Subtract the starting offset to get relative elapsed days, then convert to Timedelta
+            data_df["TIME"] = anchor_date + pd.to_timedelta(
+                data_df["TIME"] - first_value, unit="D"
+            )
+
+            # 3. (Optional) Round to nearest minute to clean up floating point imprecision
+            data_df["TIME"] = data_df["TIME"].dt.round("min")
         return data_df
 
     def read_netcdf_variable(self, file_name, variable_name):
