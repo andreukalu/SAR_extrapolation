@@ -8,24 +8,68 @@ import glob
 import AtmosphericProcessor
 
 # File Processor Class
-class FileProcessor:
+"""
+    This class takes as input all the available .nc files in fino_src_path, pre-process them, and merges them into
+    a single pd.Dataframe. 
+    All .nc files should follow FINO1 file convention. Preferably they all should be FINO1 measurement files.
+    
+"""
+class FINO1Processor:
     
     ######### Constructor ##############################
-    def __init__(self, src_path, dst_path):
-        self.src_path = src_path  # Source path for input files
-        self.dst_path = dst_path  # Destination path for output files
+    def __init__(self, fino_src_path, fino_dst_path):
+        """
+            Class constructor. Definition of the folder paths.
+        Params:
+        fino_src_path : String
+            Path to the source folder where all FINO1 .nc files are stored
+        fino_dst_path : String
+            Path to the destination folder where the processed dataframes will be stored
+        """
+        self.fino_src_path = fino_src_path  # Source path for input files
+        self.fino_dst_path = fino_dst_path  # Destination path for output files
 
     ######### Methods ##################################
-    def read_files(self):
-        files = glob.glob(os.path.join(self.src_path,'*.nc'))
+    def process_fino_files(self):
+        """
+            Read and process all the FINO1 files, generate a unified dataframe, compute the 2nd order atmospheric parameters,
+            and save the file as a pickle
+        """
+        # Read all .nc FINO1 files in fino_src_path
+        self.read_files()
 
+        # Compute the 2nd order atmospheric parameters
+        self.compute_atmospheric_parameters()
+
+        # Save the processed dataframe as a pickle in fino_dst_folder
+        self.write_pickle()
+
+    def read_files(self):
+        """
+            Read all the files in fino_src_path
+        """
+
+        # Get all the available .nc files in self.fino_src_path
+        files = glob.glob(os.path.join(self.fino_src_path,'*.nc'))
+
+        # Read and process each file in self.fino_src_path
         for file in files:
             self.read_netcdf(file)
 
     def read_netcdf(self, file_name):
         """
-        Read a NetCDF file and return a DataFrame containing the data."""
-        file_path = os.path.join(self.src_path, file_name)
+        Read a NetCDF file and return a DataFrame containing the data as a dataframe.
+        
+        Params:
+        file_name : String
+            File name of the .nc file to be read.
+        
+        Returns:
+        data_df : pd.Dataframe
+            Dataframe containing the formatted data in the input file. 
+            If previous files were already processed, the new dataframe is concatenated to the preprocessed ones.
+        """
+        file_path = os.path.join(self.fino_src_path, file_name)
         print(f"Reading NetCDF file: {file_path}")
 
         with nc.Dataset(file_path, 'r') as dataset:
@@ -35,7 +79,7 @@ class FileProcessor:
             df_list = []
             
             for var in dataset.variables:
-                # 1. Skip Quality Control (QC) variables
+                # Skip Quality Control (QC) variables
                 if 'QC' in var.upper():
                     continue
 
@@ -43,17 +87,17 @@ class FileProcessor:
                 
                 # Target 4D measurement variables (TIME, DEPTH, LON, LAT)
                 if var_obj.ndim == 4:
-                    # 2. Remove text after deg (e.g., '_10deg') using regex
+                    # Remove text after deg (e.g., '_10deg') using regex
                     clean_var = re.sub(r'_\d+deg', '', var)
-                    # 3. Remove text after dots (e.g., '.Cup Anemometer')
+                    # Remove text after dots (e.g., '.Cup Anemometer')
                     clean_var = re.sub(r'\..*', '', var)
-                    # 4. Remove ALL numbers
+                    # Remove ALL numbers
                     clean_var = re.sub(r'\d+', '', clean_var)
-                    # 6. Clean up CUP or USA text
-                    # clean_var = re.sub(r'CUP+', '', clean_var).strip('_')
+                    # Convert USA to SONIC
                     clean_var = re.sub(r'USA+', 'SONIC', clean_var).strip('_')
+                    # Clear all deg text
                     clean_var = re.sub(r'deg+', '', clean_var).strip('_')
-                    # 5. Clean up leftover underscores
+                    # Clean up leftover underscores
                     clean_var = re.sub(r'__+', '_', clean_var).strip('_')
 
                     data = var_obj[:]
@@ -74,6 +118,7 @@ class FileProcessor:
                     if not var_df.empty:
                         df_list.append(var_df)
 
+            # Fix the time column
             if df_list:
                 data_df = pd.concat(df_list, axis=1)
                 data_df.index.name = 'TIME'
@@ -124,8 +169,8 @@ class FileProcessor:
         variable_data : np.ndarray
             Numpy array containing the data for the specified variable.
         """
-        print(f"Reading variable '{variable_name}' from NetCDF file: {self.src_path}/{file_name}")
-        with nc.Dataset(f"{os.path.join(self.src_path, file_name)}", 'r') as dataset:
+        print(f"Reading variable '{variable_name}' from NetCDF file: {self.fino_src_path}/{file_name}")
+        with nc.Dataset(f"{os.path.join(self.fino_src_path, file_name)}", 'r') as dataset:
             variable_data = dataset.variables[variable_name][:]
         return variable_data
 
@@ -141,14 +186,31 @@ class FileProcessor:
         var_info : dict
             Dictionary containing variable names as keys and their dimensions as values.
         """
-        print(f"Getting variable names and dimensions from NetCDF file: {self.src_path}/{file_name}")
-        with nc.Dataset(f"{os.path.join(self.src_path, file_name)}", 'r') as dataset:
+        print(f"Getting variable names and dimensions from NetCDF file: {self.fino_src_path}/{file_name}")
+        with nc.Dataset(f"{os.path.join(self.fino_src_path, file_name)}", 'r') as dataset:
             var_info = {var: (dataset.variables[var].dimensions, dataset.variables[var].shape) for var in dataset.variables}
         print(var_info)
 
     def compute_atmospheric_parameters(self,z2=34,z1=0):
+        """
+        Function to compute the 2nd order atmospheric parameters 'Ri', 'wind_shear_exponent', and 'L'
+        and add them to each row of the pre-processed FINO1 dataframe.
+
+        Params:
+        z2 : float
+            High measurement altitude for parameter computation (m)
+        z1 : float
+            Low measurement altitudes for parameter computation (m)
+
+        Returns:
+        self.df : pd.Dataframe 
+            Modified dataframe with the 2nd order parameters.
+        """
+        # Instantiate the Atmospheric processor with the pre-processed FINO1 dataframe to compute
+        # the second order atmospheric parameters
         ap = AtmosphericProcessor.AtmosphericProcessor(self.df,z2,z1)
 
+        # Compute the 2nd order parameters
         ap.compute_bulk_Richardson_number()
         ap.compute_wind_shear_exponent()
         ap.compute_Obukhov_length()
@@ -157,15 +219,9 @@ class FileProcessor:
 
         return self.df
 
-    def write_pickle(self, file_name):
+    def write_pickle(self):
         """
-        Write a DataFrame to a pickle file.
-
-        Parameters:
-        data_df : pd.DataFrame
-            DataFrame to be written to a pickle file.
-        file_name : str
-            Name of the output pickle file.
+        Write the processed FINO1 DataFrame to a pickle file.
         """
-        print(f"Writing pickle file: {self.dst_path}/{file_name}")
-        self.df.to_pickle(f"{os.path.join(self.dst_path, file_name)}")
+        print(f"Writing pickle file: {self.fino_dst_path}")
+        self.df.to_pickle(f"{self.fino_dst_path}")

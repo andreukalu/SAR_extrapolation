@@ -1,16 +1,11 @@
+import FINO1Processor
 import SARProcessor
+import config
 
-sar_folder_path = "/mnt/csl/datasets/ARS-NEPTUNE/BBDD/SAR/PROCESSED"
-dst_path = "/mnt/csl/datasets/ARS-NEPTUNE/BBDD/SAR/MERGED"
-fino1_path = '/mnt/csl/datasets/ARS-NEPTUNE/BBDD/SAR/SEALEVEL_PROCESSED/FINO1_2016_2020_processed.pkl'
+fp = FINO1Processor.FINO1Processor(fino_src_path=config.fino_src_path,fino_dst_path=config.fino_dst_path)
+fp.process_fino_files()
 
-# SET FINO1 latitude and longitude
-lat = 54.0148
-lon = 6.5876
-
-# Set target tile dimensions
-width = 3500
-height = 3500
-
-sp = SARProcessor.SARProcessor(sar_folder_path,dst_path=dst_path,fino_src_path=fino1_path,lat=lat,lon=lon,width=width,height=height)
-sp.process_files()
+sp = SARProcessor.SARProcessor(sar_src_path=config.sar_src_path,sar_dst_path=config.sar_dst_path,\
+                               fino_src_path=config.fino_dst_path,lat=config.lat,lon=config.lon,\
+                                width=config.width,height=config.height)
+sp.process_sar_files()

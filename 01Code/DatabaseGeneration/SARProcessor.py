@@ -1,3 +1,4 @@
+# IMPORTS
 import netCDF4 as nc
 import os
 import xarray as xr
@@ -7,14 +8,59 @@ import pandas as pd
 from scipy.ndimage import uniform_filter, maximum_filter
 import glob
 import pickle
-
 import numpy as np
 
+# SAR file processor class
+"""
+    This class extracts useful information from pre-processed L-1 SLC Sentinel-1 AB data.
+    
+    All SAR files to be processed by this class should be pre-processed with SNAP software according to graph_merge_AS_remote.xml
+    They should be in netcdf format.
+
+    It can take as input a single SAR file or a folder where all files are stored.
+
+    The available computations are:
+    - Selection of tile of interest within the SAR image
+        - Description: Select a tile of interest as set by lat, lon coordinates and width and height.
+        - Function: obtain_target_tile
+    - Computation of the 2D power spectral density
+        - Description: Compute the 2D PSD of the selected tile of interest. It requires the tile selection first.
+        - Function : compute_fft_2D, and compute_welch_2D
+    - Removal of solid objects
+        - Description: Application of a false alarm filter in order to remove targets such as ships or wind turbines from the SAR image.
+        - Function: filter_objects
+    - Intersection with FINO1 data
+        - Description: Find the FINO1 data record corresponding to the SAR image measurement time
+        - Function: get_closest_measurement
+"""
 class SARProcessor:
 
-    def __init__(self,sar_src_path,dst_path='',sar_file_name='',fino_src_path=None,lat=0,lon=0,width=0.5,height=0.5):
+    def __init__(self,sar_src_path,sar_dst_path='',sar_file_name='',fino_src_path=None,lat=0,lon=0,width=3500,height=3500):
+        """
+        Class constructor.
+
+        Params:
+        sar_src_path : String
+            Path to the folder where all pre-processed SLC products are stored
+        sar_dst_path : String (optional)
+            Path to the folder where all products processed by this class will be stored if saved by write_pickle function.
+        sar_file_name : String (optional)
+            Path to a file to be processed if only a single one is to be analyzed.
+        fino_src_path : String (optional)
+            Path to the FINO1 dataframe as computed by process_FINO1_data.py
+        lat : float
+            Target latitude (deg). All computations will be centered around this latitude.
+        lon : float
+            Target longitude (deg). All computations will be centered around this longitude.
+        width : int
+            Target tile width in pixels
+        height : int
+            Target tile height in pixels
+        """
+
+        # Save paths as attributes
         self.src_path = sar_src_path
-        self.dst_path = dst_path
+        self.sar_dst_path = sar_dst_path
         self.file_name = sar_file_name
         self.file_path = os.path.join(sar_src_path,sar_file_name)
 
@@ -26,10 +72,53 @@ class SARProcessor:
         self.width = width
         self.height = height
 
+        # If FINO1 path is specified, add it as a param
         if fino_src_path != None:
             self.fino_path = fino_src_path
 
     ############## METHODS ############
+    def process_sar_files(self):
+        """
+            Process the SAR .nc files within src_path. Tiles at the coordinates of interest with dimensions
+            width and height are cutted out from the complete image, thus reducing the dataset weight.
+            
+            IMPORTANT! this function requires that fino_path is defined and pointing to the FINO1 dataframe
+        """
+
+        # Get all the available files in src_path
+        files = glob.glob(os.path.join(self.src_path,'*.nc'))
+
+        # Read the FINO1 metmast measurement dataframe
+        self.read_fino_file()
+
+        # Process each .nc SAR measurement file
+        for file in files:
+            print(f'Processing file {file}')
+            try:
+                # Read the .nc file
+                self.read_file(file)
+
+                # Cut the target tile to be processed
+                self.obtain_target_tile()
+
+                # Filter out objects in the tile such as ships or wind turbines
+                self.filter_objects(num_guard=20, num_ref=20, pfa=1e-3)
+
+                # Compute the 2D PSDs of the tile using the Welch method and periodogram method
+                self.compute_welch_2D(tile_size=(128, 128), overlap=0.5, window='hamming', return_db=True)
+                self.compute_fft_2D()
+
+                # Get the FINO1 closest measurement in time
+                self.get_closest_measurement()
+
+                # Delete the dataset containing the whole SAR image and only retain the cutted tile
+                del self.ds
+
+                # Save the processed tile with the corresponding FINO1 parameters
+                self.write_pickle(os.path.basename(file).split('.')[0])
+            except:
+                print(f'Couldnt process file {file}')
+
     def print_info(self):
             """
             Get the variable names and their dimensions from a NetCDF file.
@@ -47,34 +136,38 @@ class SARProcessor:
                 var_info = {var: (dataset.variables[var].dimensions, dataset.variables[var].shape) for var in dataset.variables}
             print(var_info)
 
-    def process_files(self):
-        
-        files = glob.glob(os.path.join(self.src_path,'*.nc'))
-
-        self.read_fino_file()
-        for file in files:
-            print(f'Processing file {file}')
-            try:
-                self.read_file(file)
-                self.obtain_target_tile()
-                self.filter_objects(num_guard=20, num_ref=20, pfa=1e-3)
-                self.compute_welch_2D(tile_size=(128, 128), overlap=0.5, window='hamming', return_db=True)
-                self.compute_fft_2D()
-                self.get_closest_measurement()
-                del self.ds
-                self.write_pickle(os.path.basename(file).split('.')[0])
-            except:
-                print(f'Couldnt process file {file}')
-
     def write_pickle(self,filename):
-        path = os.path.join(self.dst_path,filename+'.pkl')
+        """
+            Function to save processed tiles as pickles
+        
+        Params:
+        filename : String
+            File name of the pickle to be saved.
+        """
+
+        # Create the pickle path
+        path = os.path.join(self.sar_dst_path,filename+'.pkl')
 
         # Add psd to the tile
         self.tile['psd'] = self.psd
+
+        # Save the tile pickle
         with open(path, 'wb') as f:
             pickle.dump(self.tile, f)
              
     def read_file(self, file_path=''):
+        """
+            Function to read a SAR file as an xarray dataset.
+        
+        Params:
+        file_path : String
+            path of the .nc SAR file to be read
+        Returns:
+        self.ds : xr.Dataset
+            Dataset containing all the information in the SAR .nc file
+        """
+
+        # Check if the input file_path is to be used, or the on in the class attributes
         if file_path == '':
             self.ds = xr.open_dataset(self.file_path)
         else:
@@ -89,6 +182,13 @@ class SARProcessor:
         return self.ds
 
     def read_fino_file(self):
+        """
+            Read the FINO1 information and add it to this class.
+        
+        Returns:
+        self.df : pd.Dataframe
+            The FINO1 dataframe
+        """
         self.df = pd.read_pickle(self.fino_path)
         return self.df
 
@@ -128,6 +228,20 @@ class SARProcessor:
     def find_minimum_distance(self, ds, target_lat, target_lon):
         """
         Function to obtain the minimum distance of an input dataset to the target latitude and longitude
+
+        Params:
+        ds : xr.Dataset
+            The dataframe containing the SAR-measured data to carry out the minimum distance search
+        target_lan : float
+            Target latitude (deg)
+        target_lon : float
+            Target longitude (deg)
+
+        Returns:
+        x_idx : int
+            Index in the x dimension of the ds corresponding to the minimum distance to target coordinates
+        y_idx : int
+            Index in the y dimension of the ds corresponding to the minimum distance to target coordinates
         """
         # Calculate squared distance to target for every grid point
         distance = self.haversine_distance(ds.lat, ds.lon, target_lat, target_lon)
@@ -141,10 +255,16 @@ class SARProcessor:
         return x_idx, y_idx
 
     def find_coordinates_index(self):
+        """
+            Obtain the indexes x and y of the SAR-measured image closest to self.lat and self.lon.
+            Due to the large size of the images, a recursive search is carried out, decimating the image at each step
+            for faster convergence.        
+        """
+        # Get the image sizes
         x_max_len = self.ds.sizes['x']
         y_max_len = self.ds.sizes['y']
 
-        # --- Step 1: Coarse Search (skip 100) ---
+        # Coarse Search (decimate by a factor 1000)
         skip_1 = 1000
         ds_step1 = self.ds.isel(x=slice(0, None, skip_1), y=slice(0, None, skip_1))
         x_idx, y_idx = self.find_minimum_distance(ds_step1, self.lat, self.lon)
@@ -159,7 +279,7 @@ class SARProcessor:
         y_min = max(0, y_abs - skip_1)
         y_max = min(y_max_len, y_abs + skip_1 + 1)
 
-        # --- Step 2: Medium Search (skip 100) ---
+        # Medium Search (decimate by a factor 100)
         skip_2 = 100
         ds_step2 = self.ds.isel(x=slice(x_min, x_max, skip_2), y=slice(y_min, y_max, skip_2))
         x_idx, y_idx = self.find_minimum_distance(ds_step2, self.lat, self.lon)
@@ -174,7 +294,7 @@ class SARProcessor:
         y_min = max(0, y_abs - skip_2)
         y_max = min(y_max_len, y_abs + skip_2 + 1)
 
-        # --- Step 3: Fine Search (skip 1 / full resolution) ---
+        # Fine Search (full resolution)
         ds_reduced = self.ds.isel(x=slice(x_min, x_max), y=slice(y_min, y_max))
         x_idx, y_idx = self.find_minimum_distance(ds_reduced, self.lat, self.lon)
         
@@ -185,11 +305,13 @@ class SARProcessor:
         self.x_coordinate = final_x
         self.y_coordinate = final_y
 
-        return final_x, final_y, ds_reduced
-
     def obtain_target_tile(self):
         """
-        Function to retrieve a tile of SAR-measured values at the target coordinates of the specified width and height at the class constructor
+            Function to retrieve a tile of SAR-measured values at the target coordinates of the specified width and height at the class constructor
+        
+        Return:
+        self.tile : xr.Dataset
+            Dataset containing the target tile of the image.
         """
         self.find_coordinates_index()
 
@@ -197,44 +319,26 @@ class SARProcessor:
 
         return self.tile
 
-
-    def lee_filter_2d(self, arr, size=5, cu=None):
-        """
-        2D Lee Speckle Filter operating on a NumPy array.
-        """
-        # Handle NaN values safely by filling temporarily
-        nan_mask = np.isnan(arr)
-        arr_filled = np.nan_to_num(arr, nan=0.0)
-        
-        arr_filled = arr_filled.astype(np.float64)
-        
-        # Local statistics via scipy uniform filter
-        img_mean = uniform_filter(arr_filled, size=size)
-        img_sqr_mean = uniform_filter(arr_filled**2, size=size)
-        img_var = np.maximum(0, img_sqr_mean - img_mean**2)
-
-        # Noise coefficient estimation
-        if cu is None:
-            valid_vars = img_var[~nan_mask]
-            valid_means = img_mean[~nan_mask]
-            cu = np.sqrt(np.percentile(valid_vars / (valid_means**2 + 1e-8), 5))
-
-        var_noise = (cu * img_mean)**2
-
-        # Lee Weight calculation
-        weight = img_var / (img_var + var_noise + 1e-8)
-        weight = np.clip(weight, 0.0, 1.0)
-
-        # Filtered array
-        output = img_mean + weight * (arr_filled - img_mean)
-        
-        # Restore original NaN values (e.g., ocean/no-data masks)
-        output[nan_mask] = np.nan
-        
-        return output
-
     def cfar_mask_2d_numpy(self, arr, num_guard=3, num_ref=6, pfa=1e-4):
-        """NumPy 2D CA-CFAR implementation operating on spatial arrays."""
+        """
+        NumPy 2D CA-CFAR implementation operating on spatial arrays for target detection.
+
+        Params:
+        arr : xr.Array
+            Input SAR image array
+        num_guard : integer
+            guard pixels for the filter
+        num_ref : integer
+            reference pixels for the filter
+        pfa : float
+            Probability of false alarm for the filter.
+
+        Return:
+        arr_clean : xr.Array
+            Array after removal of objects detected by the CA-CFAR filter
+        target_mask : xr.Array
+            Mask with the identified objects 
+        """
         nan_mask = np.isnan(arr)
         arr_filled = np.nan_to_num(arr, nan=0.0).astype(np.float64)
 
@@ -263,8 +367,24 @@ class SARProcessor:
     def filter_objects(self, var_name='Sigma0_VV', spatial_dims=None, 
                             num_guard=20, num_ref=20, pfa=1e-3):
         """
-        Apply CFAR Target Masking directly to an xarray Dataset or DataArray.
+        Apply CFAR Target Masking directly to the previously cropped tile.
         Auto-detects spatial dimensions if spatial_dims is None.
+
+        Params:
+        var_name : String
+            Name of the variable to be processed by the object detection filter removal.
+        spatial_dims : Tuple of strings
+            Name of the spatial dimensions of the image.
+        num_guard : integer
+            guard pixels for the filter
+        num_ref : integer
+            reference pixels for the filter
+        pfa : float
+            Probability of false alarm for the filter.    
+
+        Return:
+        clean_ds : xr.Dataset
+            The dataset containing the tile with the objects removed.   
         """
         da = self.tile[var_name] if isinstance(self.tile, xr.Dataset) else self.tile
 
@@ -307,6 +427,16 @@ class SARProcessor:
     def compute_fft_2D(self, var_name='Sigma0_VV_no_targets', spatial_dims=('y', 'x')):
         """
         Computes 2D FFT on an xarray DataArray and returns a DataArray with frequency axes.
+
+        Params:
+        var_name : String
+            Name of the variable to be processed by the object detection filter removal.
+        spatial_dims : Tuple of strings
+            Name of the spatial dimensions of the image.
+        
+        Returns:
+        fft_da : xr.Array
+            The computed PSD with the periodogram method
         """
         dim_y, dim_x = spatial_dims
         
@@ -347,10 +477,9 @@ class SARProcessor:
     def compute_welch_2D(self, var_name='Sigma0_VV_no_targets', spatial_dims=('y', 'x'), tile_size=(256, 256), overlap=0.5, window='hanning', return_db=True):
         """
         Computes 2D Welch Power Spectral Density (PSD) on an xarray DataArray 
-        and returns a DataArray with centered spatial frequency axes (cycles per unit).
+        and returns a DataArray with centered spatial frequency axes (cycles per unit) using the Welch method.
 
-        Parameters:
-        -----------
+        Params:
         da : xarray.DataArray
             Input 2D SAR spatial DataArray.
         spatial_dims : tuple of str
@@ -365,7 +494,6 @@ class SARProcessor:
             If True, converts PSD to decibels: 10 * log10(PSD).
 
         Returns:
-        --------
         xr.DataArray
             2D Welch PSD with centered frequency coordinates (freq_y, freq_x).
         """
@@ -462,89 +590,18 @@ class SARProcessor:
         
         return psd_da
 
-    def find_psd_peaks(psd_da, min_wavelength_m=300, max_wavelength_m=8000, num_peaks=2, threshold_db=-45.0):
-        """
-        Finds the prominent spectral peaks in a 2D Welch PSD DataArray, excluding 
-        the DC center and high-frequency speckle.
-
-        Parameters:
-        -----------
-        psd_da : xarray.DataArray
-            The 2D PSD output from compute_welch_2D (in dB or linear scale).
-        min_wavelength_m : float
-            Minimum physical wavelength to consider (filters high-freq speckle/waves).
-        max_wavelength_m : float
-            Maximum physical wavelength to consider (filters DC/mesoscale background).
-        num_peaks : int
-            Number of dominant symmetric peak pairs to extract.
-        threshold_db : float
-            Minimum power threshold (in dB) for a peak to be considered valid.
-
-        Returns:
-        --------
-        dict containing peak coordinates (freq_x, freq_y, wavelength_m, bearing_deg, power_db)
-        """
-        # 1. Extract frequency coordinates and grid
-        fx = psd_da.freq_x.values
-        fy = psd_da.freq_y.values
-        FX, FY = np.meshgrid(fx, fy)
-        
-        # 2. Compute spatial wavelengths for every bin
-        F_radial = np.sqrt(FX**2 + FY**2)
-        wavelengths = np.divide(1.0, F_radial, out=np.zeros_like(F_radial), where=F_radial != 0)
-
-        # 3. Create a bandpass mask to isolate target atmospheric scales
-        bandpass_mask = (wavelengths >= min_wavelength_m) & (wavelengths <= max_wavelength_m)
-        
-        # Apply mask to data array
-        psd_filtered = psd_da.values.copy()
-        psd_filtered[~bandpass_mask] = -np.inf  # Set unmasked regions to minus infinity
-
-        # 4. Locate local 2D maxima using scipy
-        neighborhood_size = 5  # 5x5 pixel local window
-        local_max = (maximum_filter(psd_filtered, size=neighborhood_size) == psd_filtered)
-        
-        # Apply intensity threshold
-        valid_peaks = local_max & (psd_filtered >= threshold_db)
-
-        # 5. Extract peak indices and values
-        y_indices, x_indices = np.where(valid_peaks)
-        peak_powers = psd_filtered[y_indices, x_indices]
-
-        # Sort peaks by power in descending order
-        sort_idx = np.argsort(peak_powers)[::-1]
-        y_indices = y_indices[sort_idx][:num_peaks]
-        x_indices = x_indices[sort_idx][:num_peaks]
-
-        # 6. Format output metrics
-        results = []
-        for y_idx, x_idx in zip(y_indices, x_indices):
-            freq_x_val = fx[x_idx]
-            freq_y_val = fy[y_idx]
-            power_val = psd_da.values[y_idx, x_idx]
-            wl_val = wavelengths[y_idx, x_idx]
-
-            # Calculate meteorological direction (0 = North, 90 = East)
-            angle_math_deg = np.degrees(np.arctan2(freq_y_val, freq_x_val))
-            bearing_deg = (90.0 - angle_math_deg) % 360.0
-            
-            # Physical streak direction is perpendicular to spectral lobe direction
-            streak_direction = (bearing_deg + 90.0) % 360.0
-
-            results.append({
-                'freq_x': freq_x_val,
-                'freq_y': freq_y_val,
-                'power_db': power_val,
-                'wavelength_m': wl_val,
-                'spectral_bearing_deg': bearing_deg,
-                'physical_streak_deg': streak_direction
-            })
-
-        return results
-
     def get_closest_measurement(self, datetime_col='TIME'):
         """
-        Finds the row in df where datetime_col is closest to target_time_str.
+        Finds the row in FINO1 dataframe self.df where datetime_col is closest to target_time_str.
+        Requires that the FINO1 dataframe is read with self.read_fino_file()
+
+        Params:
+        datetime_col : String
+            Name of the datetime column in FINO1 dataset
+        
+        Returns:
+        self.tile : xr.Dataset
+            The cropped SAR tile with the added FINO1 information corresponding to the SAR measurement time.
         """
         target_time_str = self.tile.start_date
 
@@ -573,165 +630,212 @@ class SARProcessor:
     
         return self.tile
 
-    def plot_scene(self, var_name='Sigma0_VV_no_targets', clim_low=0, clim_high=0.1):
-        plt.figure()
-        plot = self.tile[var_name].plot(x='lon',y='lat')
-        plot.set_clim(clim_low,clim_high)
+    ######### PLOT FUNCTIONS #########
+    def plot_scene(self, var_name="Sigma0_VV_no_targets", clim_low=0, clim_high=0.1):
+        """Plots a spatial map of a specified target variable from the SAR tile
+        using latitude and longitude coordinates.
 
-    
-    def plot_fft(self, clim_low=30, clim_high=50, zoom=False):
-
-        plt.figure()
-        if zoom == False:
-            plot = self.psd.plot()
-            plot.set_cmap('viridis')
-            plot.set_clim(clim_low,clim_high)
-        else:
-            plot = self.psd.sel(
-                freq_x=slice(-0.005, 0.005), 
-                freq_y=slice(-0.001, 0.001)
-            ).plot()
-            plot.set_cmap('viridis')
-
-            plot.set_clim(clim_low,clim_high)
-
-        if 'Ri' in self.tile:
-            plt.gca().text(
-                0.05, 0.92, f'bRi: {self.tile.Ri.item():.3f}', 
-                transform=plt.gca().transAxes, 
-                color='white', bbox=dict(facecolor='black', alpha=0.6)
-            )
-
-        if 'wind_shear_exponent' in self.tile:
-                    plt.gca().text(
-                        0.05, 0.82, f'\alpha: {self.tile.wind_shear_exponent.item():.3f}', 
-                        transform=plt.gca().transAxes, 
-                        color='white', bbox=dict(facecolor='black', alpha=0.6)
-                    )
-
-        if 'L' in self.tile:
-                            plt.gca().text(
-                                0.05, 0.72, f'L: {self.tile.L.item():.3f}', 
-                                transform=plt.gca().transAxes, 
-                                color='white', bbox=dict(facecolor='black', alpha=0.6)
-                            )
-
-    import numpy as np
-
-
-    def calc_sigma0_cmod5_n(self, v, phi, theta):
-        """Calculates CMOD5n normalized radar backscatter (linear).
-
-        Parameters:
-            v: Wind speed [m/s] (>= 0)
-            phi: Relative wind direction [deg] (angle between azimuth and wind
-            direction)
-            theta: Incidence angle [deg]
-
-        Returns:
-            CMOD5_N: Normalized backscatter sigma0 (linear scale)
+        Params:
+        var_name : str, optional
+            The variable inside self.tile to display (default:
+            'Sigma0_VV_no_targets').
+        clim_low : float, optional
+            Minimum colorbar display threshold (default: 0).
+        clim_high : float, optional
+            Maximum colorbar display threshold (default: 0.1).
         """
+        plt.figure()
 
-        # 1-based indexing added to match Fortran C(1) .. C(28)
-        C = np.array(
-            [
-                0.0,  # Index 0 unused to maintain 1-based Fortran indexing
-                -0.6878,
-                -0.7957,
-                0.3380,
-                -0.1728,
-                0.0000,
-                0.0040,
-                0.1103,
-                0.0159,
-                6.7329,
-                2.7713,
-                -2.2885,
-                0.4971,
-                -0.7250,
-                0.0450,
-                0.0066,
-                0.3222,
-                0.0120,
-                22.7000,
-                2.0813,
-                3.0000,
-                8.3659,
-                -3.3428,
-                1.3236,
-                6.2437,
-                2.3893,
-                0.3249,
-                4.1590,
-                1.6930,
-            ]
-        )
+        # Render spatial tile using longitude/latitude coordinates
+        plot = self.tile[var_name].plot(x="lon", y="lat")
 
-        DTOR = 57.29577951
-        THETM = 40.0
-        THETHR = 25.0
-        ZPOW = 1.6
+        # Set dynamic range / color intensity limits for backscatter values
+        plot.set_clim(clim_low, clim_high)
 
-        Y0 = C[19]
-        PN = C[20]
-        A = C[19] - (C[19] - 1.0) / C[20]
-        B = 1.0 / (C[20] * (C[19] - 1.0) ** (3 - 1))
+    def plot_fft(self, clim_low=30, clim_high=50, zoom=False):
+        """Plots the 2D Power Spectral Density (PSD) calculated from the SAR imagery
+        and overlays corresponding atmospheric stability metrics (Ri, alpha, L).
 
-        # Angles
-        FI = np.radians(phi)  # equivalent to phi / DTOR
-        CSFI = np.cos(FI)
-        CS2FI = 2.0 * CSFI * CSFI - 1.0
+        Params:
+        clim_low : float, optional
+            Lower limit for the spectral power intensity scale in dB (default: 30).
+        clim_high : float, optional
+            Upper limit for the spectral power intensity scale in dB (default: 50).
+        zoom : bool, optional
+            If True, zooms in on low spatial frequency components near the spectral
+            center.
+            If False, plots the full PSD spectrum (default: False).
+        """
+        plt.figure()
 
-        X = (theta - THETM) / THETHR
-        XX = X * X
+        # Slice spatial frequencies if zoom mode is enabled
+        if not zoom:
+            plot = self.psd.plot()
+        else:
+            # Crop frequency axes around central low-frequency domain
+            plot = self.psd.sel(
+                freq_x=slice(-0.005, 0.005), freq_y=slice(-0.001, 0.001)
+            ).plot()
 
-        # B0: Function of wind speed and incidence angle
-        A0 = C[1] + C[2] * X + C[3] * XX + C[4] * X * XX
-        A1 = C[5] + C[6] * X
-        A2 = C[7] + C[8] * X
+        # Apply colormap and set power intensity bounds
+        plot.set_cmap("viridis")
+        plot.set_clim(clim_low, clim_high)
 
-        GAM = C[9] + C[10] * X + C[11] * XX
-        S0 = C[12] + C[13] * X
+        # Get current plot axes handle for adding annotation overlays
+        ax = plt.gca()
 
-        S = A2 * v
-        A3 = 1.0 / (1.0 + np.exp(-np.maximum(S, S0)))
-
-        # Piecewise condition for S < S0
-        if np.ndim(S) > 0:
-            mask = S < S0
-            A3[mask] = A3[mask] * (S[mask] / S0[mask]) ** (
-                S0[mask] * (1.0 - A3[mask])
+        # Overlay Bulk Richardson Number (bRi) if available in tile metadata
+        if "Ri" in self.tile:
+            ax.text(
+                0.05,
+                0.92,
+                f"bRi: {self.tile.Ri.item():.3f}",
+                transform=ax.transAxes,
+                color="white",
+                bbox=dict(facecolor="black", alpha=0.6),
             )
-        else:
-            if S < S0:
-                A3 = A3 * (S / S0) ** (S0 * (1.0 - A3))
 
-        B0 = (A3**GAM) * (10.0 ** (A0 + A1 * v))
+        # Overlay Wind Shear Exponent (alpha) if available (r"" used for LaTeX \alpha)
+        if "wind_shear_exponent" in self.tile:
+            ax.text(
+                0.05,
+                0.82,
+                rf"$\alpha$: {self.tile.wind_shear_exponent.item():.3f}",
+                transform=ax.transAxes,
+                color="white",
+                bbox=dict(facecolor="black", alpha=0.6),
+            )
 
-        # B1: Function of wind speed and incidence angle
-        B1 = C[15] * v * (0.5 + X - np.tanh(4.0 * (X + C[16] + C[17] * v)))
-        B1 = C[14] * (1.0 + X) - B1
-        B1 = B1 / (np.exp(0.34 * (v - C[18])) + 1.0)
+        # Overlay Obukhov Length (L) if available in tile metadata
+        if "L" in self.tile:
+            ax.text(
+                0.05,
+                0.72,
+                f"L: {self.tile.L.item():.3f}",
+                transform=ax.transAxes,
+                color="white",
+                bbox=dict(facecolor="black", alpha=0.6),
+            )
 
-        # B2: Function of wind speed and incidence angle
-        V0 = C[21] + C[22] * X + C[23] * XX
-        D1 = C[24] + C[25] * X + C[26] * XX
-        D2 = C[27] + C[28] * X
+    ########### TODO: functions to implement ####################
 
-        V2 = (v / V0) + 1.0
+    # def retrieve_stability_from_psd(self):
 
-        # Piecewise condition for V2 < Y0
-        if np.ndim(V2) > 0:
-            mask2 = V2 < Y0
-            V2[mask2] = A + B * (V2[mask2] - 1.0) ** PN
-        else:
-            if V2 < Y0:
-                V2 = A + B * (V2 - 1.0) ** PN
+    # def wind_retrieval(self):
 
-        B2 = (-D1 + D2 * V2) * np.exp(-V2)
+    ########### HELP: functions that can be used ################
+    # def calc_sigma0_cmod5_n(self, v, phi, theta):
+    #     """Calculates CMOD5n normalized radar backscatter (linear).
 
-        # CMOD5_N: Combine the three Fourier terms
-        CMOD5_N = B0 * (1.0 + B1 * CSFI + B2 * CS2FI) ** ZPOW
+    #     Parameters:
+    #         v: Wind speed [m/s] (>= 0)
+    #         phi: Relative wind direction [deg] (angle between azimuth and wind
+    #         direction)
+    #         theta: Incidence angle [deg]
 
-        return CMOD5_N
+    #     Returns:
+    #         CMOD5_N: Normalized backscatter sigma0 (linear scale)
+    #     """
 
+    #     # 1-based indexing added to match Fortran C(1) .. C(28)
+    #     C = np.array(
+    #         [
+    #             0.0,  # Index 0 unused to maintain 1-based Fortran indexing
+    #             -0.6878,
+    #             -0.7957,
+    #             0.3380,
+    #             -0.1728,
+    #             0.0000,
+    #             0.0040,
+    #             0.1103,
+    #             0.0159,
+    #             6.7329,
+    #             2.7713,
+    #             -2.2885,
+    #             0.4971,
+    #             -0.7250,
+    #             0.0450,
+    #             0.0066,
+    #             0.3222,
+    #             0.0120,
+    #             22.7000,
+    #             2.0813,
+    #             3.0000,
+    #             8.3659,
+    #             -3.3428,
+    #             1.3236,
+    #             6.2437,
+    #             2.3893,
+    #             0.3249,
+    #             4.1590,
+    #             1.6930,
+    #         ]
+    #     )
+
+    #     DTOR = 57.29577951
+    #     THETM = 40.0
+    #     THETHR = 25.0
+    #     ZPOW = 1.6
+
+    #     Y0 = C[19]
+    #     PN = C[20]
+    #     A = C[19] - (C[19] - 1.0) / C[20]
+    #     B = 1.0 / (C[20] * (C[19] - 1.0) ** (3 - 1))
+
+    #     # Angles
+    #     FI = np.radians(phi)  # equivalent to phi / DTOR
+    #     CSFI = np.cos(FI)
+    #     CS2FI = 2.0 * CSFI * CSFI - 1.0
+
+    #     X = (theta - THETM) / THETHR
+    #     XX = X * X
+
+    #     # B0: Function of wind speed and incidence angle
+    #     A0 = C[1] + C[2] * X + C[3] * XX + C[4] * X * XX
+    #     A1 = C[5] + C[6] * X
+    #     A2 = C[7] + C[8] * X
+
+    #     GAM = C[9] + C[10] * X + C[11] * XX
+    #     S0 = C[12] + C[13] * X
+
+    #     S = A2 * v
+    #     A3 = 1.0 / (1.0 + np.exp(-np.maximum(S, S0)))
+
+    #     # Piecewise condition for S < S0
+    #     if np.ndim(S) > 0:
+    #         mask = S < S0
+    #         A3[mask] = A3[mask] * (S[mask] / S0[mask]) ** (
+    #             S0[mask] * (1.0 - A3[mask])
+    #         )
+    #     else:
+    #         if S < S0:
+    #             A3 = A3 * (S / S0) ** (S0 * (1.0 - A3))
+
+    #     B0 = (A3**GAM) * (10.0 ** (A0 + A1 * v))
+
+    #     # B1: Function of wind speed and incidence angle
+    #     B1 = C[15] * v * (0.5 + X - np.tanh(4.0 * (X + C[16] + C[17] * v)))
+    #     B1 = C[14] * (1.0 + X) - B1
+    #     B1 = B1 / (np.exp(0.34 * (v - C[18])) + 1.0)
+
+    #     # B2: Function of wind speed and incidence angle
+    #     V0 = C[21] + C[22] * X + C[23] * XX
+    #     D1 = C[24] + C[25] * X + C[26] * XX
+    #     D2 = C[27] + C[28] * X
+
+    #     V2 = (v / V0) + 1.0
+
+    #     # Piecewise condition for V2 < Y0
+    #     if np.ndim(V2) > 0:
+    #         mask2 = V2 < Y0
+    #         V2[mask2] = A + B * (V2[mask2] - 1.0) ** PN
+    #     else:
+    #         if V2 < Y0:
+    #             V2 = A + B * (V2 - 1.0) ** PN
+
+    #     B2 = (-D1 + D2 * V2) * np.exp(-V2)
+
+    #     # CMOD5_N: Combine the three Fourier terms
+    #     CMOD5_N = B0 * (1.0 + B1 * CSFI + B2 * CS2FI) ** ZPOW
+
+    #     return CMOD5_N

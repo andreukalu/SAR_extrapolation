@@ -3,10 +3,43 @@ import numpy as np
 import scipy
 
 # Atmospheric Processing Class
+"""
+    This class takes as input the dataframe of FINO1 meteorological mast measurement data and
+    can compute 2nd order atmospheric parameters such as the bulk-Richardson number or the wind 
+    shear exponent.
+    All 2nd-order parameters are computed row-by-row of the dataframe and are added as columns.
+
+    AVAILABLE 2nd ORDER PARAMETERS (dataframe column name):
+    - 'Ri': 
+        - Description: bulk-Richardson number. Indicative of atmospheric stability.
+        - Function: compute_bulk_Richardson_number
+    - 'wind_shear_exponent': 
+        - Description: Wind shear exponent obtained by fitting the wind profile to the logarithmic
+        wind profile model. Can be used to extrapolate the wind profile. Indicative of atmospheric stability.
+        - Function: compute_wind_shear_exponent
+    - 'L': 
+        - Description: Obukhov length computed from the bulk-Richardson number. Reference parameter for
+        atmospheric stability.
+        - Function: compute_Obukhov_length
+"""
 class AtmosphericProcessor:
 
     ######### Constructor ##############################
     def __init__(self,df,z2,z1 = 0,anemometer_type='CUP'):
+        """
+        Class constructor.
+
+        Parameters:
+        df : Dataframe
+            The Pandas dataframe containing the FINO1 measured data.
+        z1 : Float
+            Stability measurement height z1 (m)
+        z2 : Float
+            Stability measurement height z2 (m)
+        anemometer_type : String
+            Type of anemometer of the FINO1 metmast used for calculations.
+            Can be 'CUP' or 'SONIC'
+        """
         self.R = 287.05  # Gas constant of air [J/(kg*K)]
         self.g = 9.81  # Gravitational acceleration [m/s^2]
         self.Cp = 1004.0  # Specific heat at constant pressure [J/(kg*K)]
@@ -120,12 +153,13 @@ class AtmosphericProcessor:
 
     def compute_bulk_Richardson_number(self):
         """
-        Compute the bulk Richardson number between two altitudes.
+        Compute the bulk Richardson number for the whole dataframe.
 
         Returns:
-        Ri : np.ndarray
-            Bulk Richardson number for each time step.
+        self.internal_df : pd.Dataframe
+            Dataframe containing the computed bulk Richardson numbers as column 'Ri'.
         """
+        
 
         print(f"Computing bulk Richardson number between {self.z1}m and {self.z2}m...")
 
@@ -190,7 +224,11 @@ class AtmosphericProcessor:
 
     def compute_wind_shear_exponent(self):
         """
-            Calculate wind shear exponent by fitting an exponential curve to the wind speed profile between available altitudes.
+        Calculate wind shear exponent by fitting an exponential curve to the wind speed profile between available altitudes.
+
+        Returns:
+        self.internal_dataframe : pd.Dataframe
+            Modified internal dataframe with the computed wind shear exponent as column 'wind_shear_exponent'.
         """
 
         print(f"Computing wind shear exponent between {self.z1}m and {self.z2}m...")
@@ -246,11 +284,11 @@ class AtmosphericProcessor:
 
     def compute_Obukhov_length(self):
         """
-        Compute the Obukhov length.
+        Compute the Obukhov length for the whole dataframe.
 
         Returns:
-        L : np.ndarray
-            Obukhov length for each time step.
+        self.internal_dataframe : pd.Dataframe
+            Modified internal dataframe with the computed Obukhov length as column 'L'.
         """
 
         print(f"Computing Obukhov length...")
@@ -269,6 +307,17 @@ class AtmosphericProcessor:
     def obukhov_length(self, Ri, z2, z1):
         """
         Function to compute the Obukhov length from the richardson number
+
+        Params:
+        Ri : Float
+            bulk-Richardson number.
+        z2 : Float
+            measurement height z2 (m).
+        z1 : Float
+            measurement height z1 (m).
+        Returns:
+        L : Float
+            Obukhov length.
         """
 
         # Reference height (geometric mean is often preferred, but arithmetic mean works well)
@@ -288,6 +337,18 @@ class AtmosphericProcessor:
         """
         Calculate Virtual Potential Temperature theta_v (K) using array inputs.
         T in Kelvin, RH in %, P in Pa.
+
+        Params:
+        T : Float
+            Temperature in Kelvins.
+        RH : Float
+            Relative humidity in %.
+        P : Pressure
+            Pressure in Pa.
+
+        Returns:
+        theta_v : Float
+            Virtual potential temperature.
         """
         # Mixing ratio r (kg/kg)
         r = self.mixing_ratio(T, RH, P)
@@ -310,6 +371,10 @@ class AtmosphericProcessor:
             Relative humidity (%)
         P : float
             Total atmospheric pressure (Pa)
+        
+        Returns:
+        r : float
+            Mixing ratio.
         """
         e = self.water_vapor_pressure(T, RH)
         # Clamp (P - e) to avoid zero/negative pressure edge cases
