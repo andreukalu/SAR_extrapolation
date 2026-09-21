@@ -7,6 +7,7 @@ import os
 import glob
 import datetime
 import re
+import numpy as np
 
 class Database:
 
@@ -138,8 +139,9 @@ class Database:
             self.plot_scene(save_image=True,images_path=self.images_path)
             self.plot_fft(save_image=True,images_path=self.images_path)
             self.plot_fft(zoom=True,save_image=True,images_path=self.images_path)
+            print(f'Image saved at {self.images_path}')
 
-    def plot_scene(self, var_name="Sigma0_VV_no_targets", clim_low=0, clim_high=0.1, save_image=False, images_path=''):
+    def plot_scene(self, var_name="Sigma0_VV_no_targets", clim_low=0, clim_high=0.1, normalize = True, save_image=False, images_path=''):
         """Plots a spatial map of a specified target variable from the SAR tile
         using latitude and longitude coordinates.
 
@@ -155,7 +157,10 @@ class Database:
         fig = plt.figure()
         
         # Render spatial tile using longitude/latitude coordinates
-        plot = self.tile[var_name].plot(x="lon", y="lat")
+        if normalize == True:
+            plot = (self.tile[var_name]/np.nanmax(self.tile[var_name])).plot(x="lon", y="lat")
+        else:
+            plot = self.tile[var_name].plot(x="lon", y="lat")
 
         # Set dynamic range / color intensity limits for backscatter values
         plot.set_clim(clim_low, clim_high)
@@ -200,7 +205,7 @@ class Database:
         
         plt.close(fig)
 
-    def plot_fft(self, clim_low=30, clim_high=50, zoom=False, save_image=False, images_path=''):
+    def plot_fft(self, clim_low=-40, clim_high=0, zoom=False, save_image=False, images_path=''):
         """Plots the 2D Power Spectral Density (PSD) calculated from the SAR imagery
         and overlays corresponding atmospheric stability metrics (Ri, alpha, L).
 
@@ -222,7 +227,7 @@ class Database:
         else:
             # Crop frequency axes around central low-frequency domain
             plot = self.tile.psd.sel(
-                freq_x=slice(-0.005, 0.005), freq_y=slice(-0.001, 0.001)
+                freq_x=slice(-0.005, 0.005), freq_y=slice(-0.005, 0.005)
             ).plot()
 
         # Apply colormap and set power intensity bounds

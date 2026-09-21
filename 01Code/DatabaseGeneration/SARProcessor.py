@@ -422,7 +422,10 @@ class SARProcessor:
     
             # Subtract mean component
             da_demeaned = da_filled - np.mean(da_filled)
-    
+
+            # Get the signal energy
+            total_energy_spatial = np.sum(da_demeaned.values**2)
+
             # Calculate sampling intervals (dx, dy) in physical units
             dy = np.abs(np.diff(self.tile[dim_y].values)[0])
             dx = np.abs(np.diff(self.tile[dim_x].values)[0])
@@ -451,6 +454,8 @@ class SARProcessor:
                     psd_norm = psd_raw / psd_max
                 else:
                     psd_norm = psd_raw
+                    
+                self.tile['fft_normalization_factor'] = psd_max
             else:
                 psd_norm = psd_raw
     
@@ -472,6 +477,7 @@ class SARProcessor:
             fft_da.freq_x.attrs['units'] = '1/m'
     
             self.psd = fft_da
+            self.tile['spatial_energy'] = total_energy_spatial
             
             return fft_da
     
