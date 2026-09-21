@@ -104,11 +104,15 @@ class Database:
 
         # Get the file path corresponding to the target record
         filename = self.db.iloc[idx]['filename']
+        
         path = os.path.join(self.sar_src_path,filename)
-
+        
         # Load the product
         tile = pd.read_pickle(path)
         self.tile = tile
+
+        if isinstance(self.tile, (xr.Dataset, xr.DataArray)):
+            self.tile = self.tile.load()
 
         self.sar_product = filename
         self.sar_product_meteo = self.db.iloc[idx]
@@ -149,7 +153,7 @@ class Database:
             Maximum colorbar display threshold (default: 0.1).
         """
         fig = plt.figure()
-
+        
         # Render spatial tile using longitude/latitude coordinates
         plot = self.tile[var_name].plot(x="lon", y="lat")
 
@@ -193,7 +197,8 @@ class Database:
         if save_image == True:
             img_path = os.path.join(images_path,self.sar_product.split('.')[0])
             plt.savefig(img_path, dpi=150, bbox_inches="tight")
-            plt.close(fig)
+        
+        plt.close(fig)
 
     def plot_fft(self, clim_low=30, clim_high=50, zoom=False, save_image=False, images_path=''):
         """Plots the 2D Power Spectral Density (PSD) calculated from the SAR imagery
@@ -278,9 +283,8 @@ class Database:
             if zoom == False:
                 img_path = os.path.join(images_path,self.sar_product.split('.')[0]+'_FFT')
                 plt.savefig(img_path, dpi=150, bbox_inches="tight")
-                plt.close(fig)
             else:
                 img_path = os.path.join(images_path,self.sar_product.split('.')[0]+'_FFT_zoom')
                 plt.savefig(img_path, dpi=150, bbox_inches="tight")
-                plt.close(fig)
+        plt.close(fig)
         
