@@ -35,7 +35,7 @@ import numpy as np
 """
 class SARProcessor:
 
-    def __init__(self,sar_src_path,sar_dst_path='',sar_file_name='',fino_src_path=None,lat=0,lon=0,width=3500,height=3500):
+    def __init__(self,sar_src_path,sar_dst_path='',sar_file_name='',lat=0,lon=0,width=3500,height=3500):
         """
         Class constructor.
 
@@ -46,8 +46,6 @@ class SARProcessor:
             Path to the folder where all products processed by this class will be stored if saved by write_pickle function.
         sar_file_name : String (optional)
             Path to a file to be processed if only a single one is to be analyzed.
-        fino_src_path : String (optional)
-            Path to the FINO1 dataframe as computed by process_FINO1_data.py
         lat : float
             Target latitude (deg). All computations will be centered around this latitude.
         lon : float
@@ -72,10 +70,6 @@ class SARProcessor:
         self.width = width
         self.height = height
 
-        # If FINO1 path is specified, add it as a param
-        if fino_src_path != None:
-            self.fino_path = fino_src_path
-
     ############## METHODS ############
     def process_sar_files(self):
         """
@@ -87,9 +81,6 @@ class SARProcessor:
 
         # Get all the available files in src_path
         files = glob.glob(os.path.join(self.src_path,'*.nc'))
-
-        # Read the FINO1 metmast measurement dataframe
-        self.read_fino_file()
 
         # Process each .nc SAR measurement file
         for file in files:
@@ -108,13 +99,10 @@ class SARProcessor:
                 self.compute_welch_2D(tile_size=(128, 128), overlap=0.5, window='hamming', return_db=True)
                 self.compute_fft_2D()
 
-                # Get the FINO1 closest measurement in time
-                self.get_closest_measurement()
-
                 # Delete the dataset containing the whole SAR image and only retain the cutted tile
                 del self.ds
 
-                # Save the processed tile with the corresponding FINO1 parameters
+                # Save the processed tile
                 self.write_pickle(os.path.basename(file).split('.')[0])
             except:
                 print(f'Couldnt process file {file}')
@@ -180,17 +168,6 @@ class SARProcessor:
         ]
         self.ds['platform_heading'] = self.ds['platform_heading'][0]
         return self.ds
-
-    def read_fino_file(self):
-        """
-            Read the FINO1 information and add it to this class.
-        
-        Returns:
-        self.df : pd.Dataframe
-            The FINO1 dataframe
-        """
-        self.df = pd.read_pickle(self.fino_path)
-        return self.df
 
     def haversine_distance(self, lat1, lon1, lat2, lon2, earth_radius_km=6371.0):
         """
@@ -629,93 +606,6 @@ class SARProcessor:
             self.tile[col_name] = value
     
         return self.tile
-
-    ######### PLOT FUNCTIONS #########
-    def plot_scene(self, var_name="Sigma0_VV_no_targets", clim_low=0, clim_high=0.1):
-        """Plots a spatial map of a specified target variable from the SAR tile
-        using latitude and longitude coordinates.
-
-        Params:
-        var_name : str, optional
-            The variable inside self.tile to display (default:
-            'Sigma0_VV_no_targets').
-        clim_low : float, optional
-            Minimum colorbar display threshold (default: 0).
-        clim_high : float, optional
-            Maximum colorbar display threshold (default: 0.1).
-        """
-        plt.figure()
-
-        # Render spatial tile using longitude/latitude coordinates
-        plot = self.tile[var_name].plot(x="lon", y="lat")
-
-        # Set dynamic range / color intensity limits for backscatter values
-        plot.set_clim(clim_low, clim_high)
-
-    def plot_fft(self, clim_low=30, clim_high=50, zoom=False):
-        """Plots the 2D Power Spectral Density (PSD) calculated from the SAR imagery
-        and overlays corresponding atmospheric stability metrics (Ri, alpha, L).
-
-        Params:
-        clim_low : float, optional
-            Lower limit for the spectral power intensity scale in dB (default: 30).
-        clim_high : float, optional
-            Upper limit for the spectral power intensity scale in dB (default: 50).
-        zoom : bool, optional
-            If True, zooms in on low spatial frequency components near the spectral
-            center.
-            If False, plots the full PSD spectrum (default: False).
-        """
-        plt.figure()
-
-        # Slice spatial frequencies if zoom mode is enabled
-        if not zoom:
-            plot = self.psd.plot()
-        else:
-            # Crop frequency axes around central low-frequency domain
-            plot = self.psd.sel(
-                freq_x=slice(-0.005, 0.005), freq_y=slice(-0.001, 0.001)
-            ).plot()
-
-        # Apply colormap and set power intensity bounds
-        plot.set_cmap("viridis")
-        plot.set_clim(clim_low, clim_high)
-
-        # Get current plot axes handle for adding annotation overlays
-        ax = plt.gca()
-
-        # Overlay Bulk Richardson Number (bRi) if available in tile metadata
-        if "Ri" in self.tile:
-            ax.text(
-                0.05,
-                0.92,
-                f"bRi: {self.tile.Ri.item():.3f}",
-                transform=ax.transAxes,
-                color="white",
-                bbox=dict(facecolor="black", alpha=0.6),
-            )
-
-        # Overlay Wind Shear Exponent (alpha) if available (r"" used for LaTeX \alpha)
-        if "wind_shear_exponent" in self.tile:
-            ax.text(
-                0.05,
-                0.82,
-                rf"$\alpha$: {self.tile.wind_shear_exponent.item():.3f}",
-                transform=ax.transAxes,
-                color="white",
-                bbox=dict(facecolor="black", alpha=0.6),
-            )
-
-        # Overlay Obukhov Length (L) if available in tile metadata
-        if "L" in self.tile:
-            ax.text(
-                0.05,
-                0.72,
-                f"L: {self.tile.L.item():.3f}",
-                transform=ax.transAxes,
-                color="white",
-                bbox=dict(facecolor="black", alpha=0.6),
-            )
 
     ########### TODO: functions to implement ####################
 

@@ -4,6 +4,8 @@ fino_dst_path = 'C:/Users/Public/Downloads/FINO1data/FINO1_processed/FINO1_2016_
 sar_src_path = "C:/Users/Public/Downloads/SARdata"
 sar_dst_path = "C:/Users/Public/Downloads/SARdata/Pickles"
 
+db_path = "C:/Users/Public/Downloads/DB/DB.pkl"
+
 # SET FINO1 latitude and longitude
 lat = 54.0148
 lon = 6.5876
