@@ -401,55 +401,80 @@ class SARProcessor:
         else:
             return xr.merge([da_clean, da_mask])
 
-    def compute_fft_2D(self, var_name='Sigma0_VV_no_targets', spatial_dims=('y', 'x')):
-        """
-        Computes 2D FFT on an xarray DataArray and returns a DataArray with frequency axes.
-
-        Params:
-        var_name : String
-            Name of the variable to be processed by the object detection filter removal.
-        spatial_dims : Tuple of strings
-            Name of the spatial dimensions of the image.
-        
-        Returns:
-        fft_da : xr.Array
-            The computed PSD with the periodogram method
-        """
-        dim_y, dim_x = spatial_dims
-        
-        # Fill NaNs before FFT (FFTs cannot process NaNs)
-        da_filled = self.tile[var_name].fillna(np.mean(self.tile[var_name]))
-        
-        # Calculate sampling intervals (dx, dy) in physical units
-        dy = np.abs(np.diff(self.tile[dim_y].values)[0])
-        dx = np.abs(np.diff(self.tile[dim_x].values)[0])
-
-        # Assumed values
-        dy = self.tile.metadata.attrs['Abstracted_Metadata:azimuth_spacing']
-        dx = self.tile.metadata.attrs['Abstracted_Metadata:range_spacing']
-
-        # 2D FFT computation
-        fft_vals = np.fft.fftshift(np.fft.fft2(da_filled- np.mean(da_filled)))
-        power_db = 10 * np.log10(np.abs(fft_vals)**2 + 1e-8)
-        # power_db = np.abs(fft_vals)**2
-        
-        # Compute centered frequency coordinates (cycles per spatial unit)
-        freq_y = np.fft.fftshift(np.fft.fftfreq(self.tile[dim_y].size, d=dy))
-        freq_x = np.fft.fftshift(np.fft.fftfreq(self.tile[dim_x].size, d=dx))
-        
-        # Construct output DataArray
-        fft_da = xr.DataArray(
-            power_db,
-            coords={'freq_y': freq_y, 'freq_x': freq_x},
-            dims=['freq_y', 'freq_x'],
-            name='power_spectrum_db'
-        )
-        fft_da.freq_y.attrs['units'] = '1/m'
-        fft_da.freq_x.attrs['units'] = '1/m'
-
-        self.psd = fft_da
-        
-        return fft_da
+    def compute_fft_2D(self, var_name='Sigma0_VV_no_targets', spatial_dims=('y', 'x'), filter=True, normalize=True):
+            """
+            Computes 2D FFT on an xarray DataArray and returns a DataArray with frequency axes.
+    
+            Params:
+            var_name : String
+                Name of the variable to be processed by the object detection filter removal.
+            spatial_dims : Tuple of strings
+                Name of the spatial dimensions of the image.
+            
+            Returns:
+            fft_da : xr.Array
+                The computed PSD with the periodogram method
+            """
+            dim_y, dim_x = spatial_dims
+            
+            # Fill NaNs before FFT (FFTs cannot process NaNs)
+            da_filled = self.tile[var_name].fillna(np.mean(self.tile[var_name]))
+    
+            # Subtract mean component
+            da_demeaned = da_filled - np.mean(da_filled)
+    
+            # Calculate sampling intervals (dx, dy) in physical units
+            dy = np.abs(np.diff(self.tile[dim_y].values)[0])
+            dx = np.abs(np.diff(self.tile[dim_x].values)[0])
+    
+            # Assumed values
+            dy = self.tile.metadata.attrs['Abstracted_Metadata:azimuth_spacing']
+            dx = self.tile.metadata.attrs['Abstracted_Metadata:range_spacing']
+    
+            if filter == True:
+                # 3. Create and apply a 2D Hanning window to suppress boundary artifacts
+                Ny, Nx = da_demeaned.shape
+                win_y = np.hanning(Ny)
+                win_x = np.hanning(Nx)
+                window_2d = np.outer(win_y, win_x)
+                
+                da_demeaned = da_demeaned * window_2d
+    
+            # 2D FFT computation
+            fft_vals = np.fft.fftshift(np.fft.fft2(da_demeaned))
+            psd_raw = np.abs(fft_vals)**2
+    
+            # Normalize PSD to the maximum value if desired
+            if normalize == True:
+                psd_max = np.max(psd_raw)
+                if psd_max > 0:
+                    psd_norm = psd_raw / psd_max
+                else:
+                    psd_norm = psd_raw
+            else:
+                psd_norm = psd_raw
+    
+            # Convert to dB (Normalized max will be 0 dB)
+            power_db = 10 * np.log10(psd_norm + 1e-8)
+            
+            # Compute centered frequency coordinates (cycles per spatial unit)
+            freq_y = np.fft.fftshift(np.fft.fftfreq(self.tile[dim_y].size, d=dy))
+            freq_x = np.fft.fftshift(np.fft.fftfreq(self.tile[dim_x].size, d=dx))
+            
+            # Construct output DataArray
+            fft_da = xr.DataArray(
+                power_db,
+                coords={'freq_y': freq_y, 'freq_x': freq_x},
+                dims=['freq_y', 'freq_x'],
+                name='power_spectrum_db'
+            )
+            fft_da.freq_y.attrs['units'] = '1/m'
+            fft_da.freq_x.attrs['units'] = '1/m'
+    
+            self.psd = fft_da
+            
+            return fft_da
+    
 
     def compute_welch_2D(self, var_name='Sigma0_VV_no_targets', spatial_dims=('y', 'x'), tile_size=(256, 256), overlap=0.5, window='hanning', return_db=True):
         """
