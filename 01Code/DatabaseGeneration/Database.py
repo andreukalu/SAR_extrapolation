@@ -1,5 +1,7 @@
 import pandas as pd
 import xarray as xr
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import os
 import glob
@@ -8,7 +10,7 @@ import re
 
 class Database:
 
-    def __init__(self,db_path,sar_src_path='',fino_src_path=''):
+    def __init__(self,db_path,sar_src_path='',fino_src_path='',images_path=''):
 
         # Add paths to processed SAR files and FINO1
         self.sar_src_path = sar_src_path
@@ -16,6 +18,9 @@ class Database:
         
         # Add path to the database file
         self.db_path = db_path
+
+        # Add path to the images folder
+        self.images_path = images_path
 
     def save_db_to_pickle(self):
         self.db.to_pickle(self.db_path)
@@ -105,10 +110,32 @@ class Database:
         tile = pd.read_pickle(path)
         self.tile = tile
 
+        self.sar_product = filename
+        self.sar_product_meteo = self.db.iloc[idx]
+
         return tile
 
     ######### PLOT FUNCTIONS #########
-    def plot_scene(self, var_name="Sigma0_VV_no_targets", clim_low=0, clim_high=0.1):
+    def generate_db_images(self,images_path=''):
+        """
+        Generates images for the whole database with scene images and FFT images
+
+        Params:
+        images_path = String
+            Path to where the images will be stored
+        """
+
+        if images_path != '':
+            self.images_path = images_path
+
+        for index in self.db.index:
+            print(f'Generating image {index}')
+            self.load_sar_product(index)
+            self.plot_scene(save_image=True,images_path=self.images_path)
+            self.plot_fft(save_image=True,images_path=self.images_path)
+            self.plot_fft(zoom=True,save_image=True,images_path=self.images_path)
+
+    def plot_scene(self, var_name="Sigma0_VV_no_targets", clim_low=0, clim_high=0.1, save_image=False, images_path=''):
         """Plots a spatial map of a specified target variable from the SAR tile
         using latitude and longitude coordinates.
 
@@ -121,7 +148,7 @@ class Database:
         clim_high : float, optional
             Maximum colorbar display threshold (default: 0.1).
         """
-        plt.figure()
+        fig = plt.figure()
 
         # Render spatial tile using longitude/latitude coordinates
         plot = self.tile[var_name].plot(x="lon", y="lat")
@@ -129,7 +156,46 @@ class Database:
         # Set dynamic range / color intensity limits for backscatter values
         plot.set_clim(clim_low, clim_high)
 
-    def plot_fft(self, clim_low=30, clim_high=50, zoom=False):
+        # Get current plot axes handle for adding annotation overlays
+        ax = fig.gca()
+
+        # Overlay Bulk Richardson Number (bRi) if available in tile metadata
+        ax.text(
+            0.05,
+            0.92,
+            f"bRi: {self.sar_product_meteo['Ri']:.3f}",
+            transform=ax.transAxes,
+            color="white",
+            bbox=dict(facecolor="black", alpha=0.6),
+        )
+
+        # Overlay Wind Shear Exponent (alpha) if available (r"" used for LaTeX \alpha)
+        ax.text(0.05,
+            0.82,
+            rf"$\alpha$: {self.sar_product_meteo['wind_shear_exponent']:.3f}",
+            transform=ax.transAxes,
+            color="white",
+            bbox=dict(facecolor="black", alpha=0.6),
+        )
+
+        # Overlay Obukhov Length (L) if available in tile metadata
+        ax.text(
+            0.05,
+            0.72,
+            f"L: {self.sar_product_meteo['L']:.3f}",
+            transform=ax.transAxes,
+            color="white",
+            bbox=dict(facecolor="black", alpha=0.6),
+        )
+        
+        plt.title(self.sar_product)
+
+        if save_image == True:
+            img_path = os.path.join(images_path,self.sar_product.split('.')[0])
+            plt.savefig(img_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+    def plot_fft(self, clim_low=30, clim_high=50, zoom=False, save_image=False, images_path=''):
         """Plots the 2D Power Spectral Density (PSD) calculated from the SAR imagery
         and overlays corresponding atmospheric stability metrics (Ri, alpha, L).
 
@@ -143,20 +209,22 @@ class Database:
             center.
             If False, plots the full PSD spectrum (default: False).
         """
-        plt.figure()
+        fig = plt.figure()
 
         # Slice spatial frequencies if zoom mode is enabled
         if not zoom:
-            plot = self.psd.plot()
+            plot = self.tile.psd.plot()
         else:
             # Crop frequency axes around central low-frequency domain
-            plot = self.psd.sel(
+            plot = self.tile.psd.sel(
                 freq_x=slice(-0.005, 0.005), freq_y=slice(-0.001, 0.001)
             ).plot()
 
         # Apply colormap and set power intensity bounds
         plot.set_cmap("viridis")
         plot.set_clim(clim_low, clim_high)
+
+        plt.title(self.sar_product)
 
         # Get current plot axes handle for adding annotation overlays
         ax = plt.gca()
@@ -172,25 +240,47 @@ class Database:
                 bbox=dict(facecolor="black", alpha=0.6),
             )
 
+        # Get current plot axes handle for adding annotation overlays
+        ax = fig.gca()
+
+        # Overlay Bulk Richardson Number (bRi) if available in tile metadata
+        ax.text(
+            0.05,
+            0.92,
+            f"bRi: {self.sar_product_meteo['Ri']:.3f}",
+            transform=ax.transAxes,
+            color="white",
+            bbox=dict(facecolor="black", alpha=0.6),
+        )
+
         # Overlay Wind Shear Exponent (alpha) if available (r"" used for LaTeX \alpha)
-        if "wind_shear_exponent" in self.tile:
-            ax.text(
-                0.05,
-                0.82,
-                rf"$\alpha$: {self.tile.wind_shear_exponent.item():.3f}",
-                transform=ax.transAxes,
-                color="white",
-                bbox=dict(facecolor="black", alpha=0.6),
-            )
+        ax.text(0.05,
+            0.82,
+            rf"$\alpha$: {self.sar_product_meteo['wind_shear_exponent']:.3f}",
+            transform=ax.transAxes,
+            color="white",
+            bbox=dict(facecolor="black", alpha=0.6),
+        )
 
         # Overlay Obukhov Length (L) if available in tile metadata
-        if "L" in self.tile:
-            ax.text(
-                0.05,
-                0.72,
-                f"L: {self.tile.L.item():.3f}",
-                transform=ax.transAxes,
-                color="white",
-                bbox=dict(facecolor="black", alpha=0.6),
-            )
+        ax.text(
+            0.05,
+            0.72,
+            f"L: {self.sar_product_meteo['L']:.3f}",
+            transform=ax.transAxes,
+            color="white",
+            bbox=dict(facecolor="black", alpha=0.6),
+        )
+        
+        plt.title(self.sar_product)
+
+        if save_image == True:
+            if zoom == False:
+                img_path = os.path.join(images_path,self.sar_product.split('.')[0]+'_FFT')
+                plt.savefig(img_path, dpi=150, bbox_inches="tight")
+                plt.close(fig)
+            else:
+                img_path = os.path.join(images_path,self.sar_product.split('.')[0]+'_FFT_zoom')
+                plt.savefig(img_path, dpi=150, bbox_inches="tight")
+                plt.close(fig)
         

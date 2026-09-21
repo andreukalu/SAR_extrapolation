@@ -6,6 +6,8 @@ sar_dst_path = "C:/Users/Public/Downloads/SARdata/Pickles"
 
 db_path = "C:/Users/Public/Downloads/DB/DB.pkl"
 
+images_path = "C:/Users/Public/Downloads/images"
+
 # SET FINO1 latitude and longitude
 lat = 54.0148
 lon = 6.5876
