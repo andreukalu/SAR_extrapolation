@@ -62,6 +62,9 @@ class SARProcessor:
         self.file_name = sar_file_name
         self.file_path = os.path.join(sar_src_path,sar_file_name)
 
+        # Create SAR dst directory
+        os.makedirs(self.sar_dst_path, exist_ok=True)
+
         # Add target coordinates
         self.lat = lat
         self.lon = lon

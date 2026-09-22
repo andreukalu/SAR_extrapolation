@@ -20,8 +20,14 @@ class Database:
         # Add path to the database file
         self.db_path = db_path
 
+        # Create DB directory
+        os.makedirs(db_path, exist_ok=True)
+
         # Add path to the images folder
         self.images_path = images_path
+        
+        # Create images directory
+        os.makedirs(images_path, exist_ok=True)
 
     def save_db_to_pickle(self):
         self.db.to_pickle(self.db_path)
@@ -292,4 +298,5 @@ class Database:
                 img_path = os.path.join(images_path,self.sar_product.split('.')[0]+'_FFT_zoom')
                 plt.savefig(img_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
+
         

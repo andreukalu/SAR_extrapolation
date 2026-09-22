@@ -28,6 +28,9 @@ class FINO1Processor:
         """
         self.fino_src_path = fino_src_path  # Source path for input files
         self.fino_dst_path = fino_dst_path  # Destination path for output files
+        
+        # Create FINO dst directory
+        os.makedirs(self.fino_dst_path, exist_ok=True)
 
     ######### Methods ##################################
     def process_fino_files(self):
