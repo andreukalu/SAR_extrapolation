@@ -1,7 +1,6 @@
 import pandas as pd
 import xarray as xr
 import matplotlib
-matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 import os
 import glob
@@ -146,6 +145,8 @@ class Database:
             self.plot_scene(save_image=True,images_path=self.images_path)
             self.plot_fft(save_image=True,images_path=self.images_path)
             self.plot_fft(zoom=True,save_image=True,images_path=self.images_path)
+            self.plot_autocorr(save_image=True,images_path=self.images_path)
+            self.plot_autocorr(zoom=True,save_image=True,images_path=self.images_path)
             print(f'Image saved at {self.images_path}')
 
     def plot_scene(self, var_name="Sigma0_VV_no_targets", clim_low=0, clim_high=0.1, normalize = True, save_image=False, images_path=''):
@@ -304,7 +305,95 @@ class Database:
         else:
             plt.show()
 
-     
+    def plot_autocorr(self, clim_low=0, clim_high=0.1, zoom=False, save_image=False, images_path=''):
+            """Plots the 2D Power Spectral Density (PSD) calculated from the SAR imagery
+            and overlays corresponding atmospheric stability metrics (Ri, alpha, L).
+    
+            Params:
+            clim_low : float, optional
+                Lower limit for the spectral power intensity scale in dB (default: 30).
+            clim_high : float, optional
+                Upper limit for the spectral power intensity scale in dB (default: 50).
+            zoom : bool, optional
+                If True, zooms in on low spatial frequency components near the spectral
+                center.
+                If False, plots the full PSD spectrum (default: False).
+            """
+            fig = plt.figure()
+    
+            # Slice spatial frequencies if zoom mode is enabled
+            if not zoom:
+                plot = self.tile.autocorr.plot()
+            else:
+                # Crop frequency axes around central low-frequency domain
+                plot = self.tile.autocorr.sel(
+                    lag_x=slice(-10e3, 10e3), lag_y=slice(-10e3, 10e3)
+                ).plot()
+    
+            # Apply colormap and set power intensity bounds
+            plot.set_cmap("viridis")
+            plot.set_clim(clim_low, clim_high)
+    
+            plt.title(self.sar_product)
+    
+            # Get current plot axes handle for adding annotation overlays
+            ax = plt.gca()
+    
+            # Overlay Bulk Richardson Number (bRi) if available in tile metadata
+            if "Ri" in self.tile:
+                ax.text(
+                    0.05,
+                    0.92,
+                    f"bRi: {self.tile.Ri.item():.3f}",
+                    transform=ax.transAxes,
+                    color="white",
+                    bbox=dict(facecolor="black", alpha=0.6),
+                )
+    
+            # Get current plot axes handle for adding annotation overlays
+            ax = fig.gca()
+    
+            # Overlay Bulk Richardson Number (bRi) if available in tile metadata
+            ax.text(
+                0.05,
+                0.92,
+                f"bRi: {self.sar_product_meteo['Ri']:.3f}",
+                transform=ax.transAxes,
+                color="white",
+                bbox=dict(facecolor="black", alpha=0.6),
+            )
+    
+            # Overlay Wind Shear Exponent (alpha) if available (r"" used for LaTeX \alpha)
+            ax.text(0.05,
+                0.82,
+                rf"$\alpha$: {self.sar_product_meteo['wind_shear_exponent']:.3f}",
+                transform=ax.transAxes,
+                color="white",
+                bbox=dict(facecolor="black", alpha=0.6),
+            )
+    
+            # Overlay Obukhov Length (L) if available in tile metadata
+            ax.text(
+                0.05,
+                0.72,
+                f"L: {self.sar_product_meteo['L']:.3f}",
+                transform=ax.transAxes,
+                color="white",
+                bbox=dict(facecolor="black", alpha=0.6),
+            )
+            
+            plt.title(self.sar_product)
+    
+            if save_image == True:
+                if zoom == False:
+                    img_path = os.path.join(images_path,self.sar_product.split('.')[0]+'_AC')
+                    plt.savefig(img_path, dpi=150, bbox_inches="tight")
+                else:
+                    img_path = os.path.join(images_path,self.sar_product.split('.')[0]+'_AC_zoom')
+                    plt.savefig(img_path, dpi=150, bbox_inches="tight")
+                plt.close(fig)
+            else:
+                plt.show()
         
     def plot_wind_shear_profile(self):
         # Plot the wind shear fit for the first wind profile

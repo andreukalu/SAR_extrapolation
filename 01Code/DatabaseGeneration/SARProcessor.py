@@ -101,8 +101,10 @@ class SARProcessor:
                 self.filter_objects(num_guard=20, num_ref=20, pfa=1e-3)
 
                 # Compute the 2D PSDs of the tile using the Welch method and periodogram method
-                self.compute_welch_2D(tile_size=(128, 128), overlap=0.5, window='hamming', return_db=True)
+                # self.compute_welch_2D(tile_size=(128, 128), overlap=0.5, window='hamming', return_db=True)
                 self.compute_fft_2D()
+
+                self.compute_autocorr_2D()
 
                 # Delete the dataset containing the whole SAR image and only retain the cutted tile
                 del self.ds
@@ -143,6 +145,9 @@ class SARProcessor:
 
         # Add psd to the tile
         self.tile['psd'] = self.psd
+        
+        # Add autocorr to the tile
+        self.tile['autocorr'] = self.autocorr
 
         # Save the tile pickle
         self.tile.to_netcdf(path)
@@ -601,6 +606,93 @@ class SARProcessor:
         self.psd = psd_da
         
         return psd_da
+
+    def compute_autocorr_2D(self, var_name="Sigma0_VV_no_targets", spatial_dims=("y", "x"), filter=True, normalize=True):
+        """Computes 2D Autocorrelation on an xarray DataArray via FFT and returns
+
+        a DataArray with physical spatial lag coordinates (in meters).
+
+        Params:
+        var_name : String
+            Name of the variable to be processed.
+        spatial_dims : Tuple of strings
+            Name of the spatial dimensions of the image.
+        filter : Bool
+            Whether to apply a 2D Hanning window before computing autocorrelation.
+        normalize : Bool
+            If True, normalizes the autocorrelation peak at zero-lag to 1.0.
+
+        Returns:
+        autocorr_da : xr.DataArray
+            The 2D autocorrelation surface indexed by spatial lags (lag_y, lag_x).
+        """
+        dim_y, dim_x = spatial_dims
+
+        # Fill NaNs before FFT operations (FFTs cannot process NaNs)
+        da_filled = self.tile[var_name].fillna(np.mean(self.tile[var_name]))
+
+        # Subtract mean component (Crucial for autocorrelation to isolate spatial structures)
+        da_demeaned = da_filled - np.mean(da_filled)
+
+        # Spatial dimensions
+        Ny, Nx = da_demeaned.shape
+
+        # Retrieve sampling intervals (dy, dx) in meters from metadata
+        dy = self.tile.metadata.attrs["Abstracted_Metadata:azimuth_spacing"]
+        dx = self.tile.metadata.attrs["Abstracted_Metadata:range_spacing"]
+
+        if filter:
+            # Apply a 2D Hanning window to suppress boundary discontinuity artifacts
+            win_y = np.hanning(Ny)
+            win_x = np.hanning(Nx)
+            window_2d = np.outer(win_y, win_x)
+
+            da_demeaned = da_demeaned * window_2d
+
+        # --- Wiener–Khinchin Theorem for 2D Autocorrelation ---
+        # 1. Zero-pad to avoid circular correlation / aliasing effects
+        pad_shape = (2 * Ny - 1, 2 * Nx - 1)
+
+        # 2. FFT -> Power Spectral Density (PSD) -> Inverse FFT
+        fft_vals = np.fft.fft2(da_demeaned, s=pad_shape)
+        psd_raw = np.abs(fft_vals) ** 2
+        autocorr_raw = np.fft.ifft2(psd_raw).real
+
+        # 3. Shift zero-lag (maximum correlation peak) to center
+        autocorr_shifted = np.fft.fftshift(autocorr_raw)
+
+        # Normalize autocorrelation so zero-lag peak = 1.0
+        if normalize:
+            zero_lag_val = autocorr_shifted[
+                autocorr_shifted.shape[0] // 2, autocorr_shifted.shape[1] // 2
+            ]
+            if zero_lag_val > 0:
+                autocorr_out = autocorr_shifted / zero_lag_val
+            else:
+                autocorr_out = autocorr_shifted
+            self.tile["autocorr_peak_value"] = zero_lag_val
+        else:
+            autocorr_out = autocorr_shifted
+
+        # --- Construct Physical Spatial Lag Axes (in meters) ---
+        # Centered lags ranging from -(N-1)*d to +(N-1)*d
+        lags_y = np.arange(-(Ny - 1), Ny) * dy
+        lags_x = np.arange(-(Nx - 1), Nx) * dx
+
+        # Construct output DataArray matching the xarray workflow
+        autocorr_da = xr.DataArray(
+            autocorr_out,
+            coords={"lag_y": lags_y, "lag_x": lags_x},
+            dims=["lag_y", "lag_x"],
+            name="autocorrelation",
+        )
+        autocorr_da.lag_y.attrs["units"] = "m"
+        autocorr_da.lag_x.attrs["units"] = "m"
+
+        # Save to object attribute and return
+        self.autocorr = autocorr_da
+
+        return autocorr_da
 
     def get_closest_measurement(self, datetime_col='TIME'):
         """
