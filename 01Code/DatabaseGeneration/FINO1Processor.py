@@ -30,7 +30,9 @@ class FINO1Processor:
         self.fino_dst_path = fino_dst_path  # Destination path for output files
         
         # Create FINO dst directory
-        os.makedirs(self.fino_dst_path, exist_ok=True)
+        dirname, fname = os.path.split(self.fino_dst_path)
+        if not os.path.isdir(dirname):
+            os.makedirs(dirname)
 
     ######### Methods ##################################
     def process_fino_files(self):

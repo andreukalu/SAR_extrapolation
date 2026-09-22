@@ -63,7 +63,9 @@ class SARProcessor:
         self.file_path = os.path.join(sar_src_path,sar_file_name)
 
         # Create SAR dst directory
-        os.makedirs(self.sar_dst_path, exist_ok=True)
+        dirname, fname = os.path.split(self.sar_dst_path)
+        if not os.path.isdir(dirname):
+            os.makedirs(dirname)
 
         # Add target coordinates
         self.lat = lat
@@ -106,7 +108,7 @@ class SARProcessor:
                 del self.ds
 
                 # Save the processed tile
-                self.write_pickle(os.path.basename(file).split('.')[0])
+                self.write_product(os.path.basename(file).split('.')[0])
             except:
                 print(f'Couldnt process file {file}')
 
@@ -127,7 +129,7 @@ class SARProcessor:
                 var_info = {var: (dataset.variables[var].dimensions, dataset.variables[var].shape) for var in dataset.variables}
             print(var_info)
 
-    def write_pickle(self,filename):
+    def write_product(self,filename):
         """
             Function to save processed tiles as pickles
         
@@ -137,14 +139,13 @@ class SARProcessor:
         """
 
         # Create the pickle path
-        path = os.path.join(self.sar_dst_path,filename+'.pkl')
+        path = os.path.join(self.sar_dst_path,filename+'.nc')
 
         # Add psd to the tile
         self.tile['psd'] = self.psd
 
         # Save the tile pickle
-        with open(path, 'wb') as f:
-            pickle.dump(self.tile, f)
+        self.tile.to_netcdf(path)
              
     def read_file(self, file_path=''):
         """

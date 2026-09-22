@@ -1,7 +1,7 @@
 import pandas as pd
 import xarray as xr
 import matplotlib
-matplotlib.use('Agg')
+matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 import os
 import glob
@@ -21,13 +21,17 @@ class Database:
         self.db_path = db_path
 
         # Create DB directory
-        os.makedirs(db_path, exist_ok=True)
+        dirname, fname = os.path.split(db_path)
+        if not os.path.isdir(dirname):
+            os.makedirs(dirname)
 
         # Add path to the images folder
         self.images_path = images_path
         
         # Create images directory
-        os.makedirs(images_path, exist_ok=True)
+        dirname, fname = os.path.split(images_path)
+        if not os.path.isdir(dirname):
+            os.makedirs(dirname)
 
     def save_db_to_pickle(self):
         self.db.to_pickle(self.db_path)
@@ -41,7 +45,7 @@ class Database:
         self.fino1_df = pd.read_pickle(self.fino_src_path)
 
         # Get paths of SAR files
-        SAR_files = glob.glob(os.path.join(self.sar_src_path,'*.pkl'))
+        SAR_files = glob.glob(os.path.join(self.sar_src_path,'*.nc'))
         
         # Instantiate database dataframe
         db = pd.DataFrame()
@@ -115,11 +119,8 @@ class Database:
         path = os.path.join(self.sar_src_path,filename)
         
         # Load the product
-        tile = pd.read_pickle(path)
+        tile = xr.open_dataset(path)
         self.tile = tile
-
-        if isinstance(self.tile, (xr.Dataset, xr.DataArray)):
-            self.tile = self.tile.load()
 
         self.sar_product = filename
         self.sar_product_meteo = self.db.iloc[idx]
@@ -208,8 +209,10 @@ class Database:
         if save_image == True:
             img_path = os.path.join(images_path,self.sar_product.split('.')[0])
             plt.savefig(img_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+        else:
+            plt.show()
         
-        plt.close(fig)
 
     def plot_fft(self, clim_low=-40, clim_high=0, zoom=False, save_image=False, images_path=''):
         """Plots the 2D Power Spectral Density (PSD) calculated from the SAR imagery
@@ -297,6 +300,34 @@ class Database:
             else:
                 img_path = os.path.join(images_path,self.sar_product.split('.')[0]+'_FFT_zoom')
                 plt.savefig(img_path, dpi=150, bbox_inches="tight")
-        plt.close(fig)
+            plt.close(fig)
+        else:
+            plt.show()
 
+     
         
+    def plot_wind_shear_profile(self):
+        # Plot the wind shear fit for the first wind profile
+        plt.figure()
+        # Plot the actual wind profile
+        wind_speed_columns = [col for col in self.sar_product_meteo.columns if col.startswith('WSPD') and 'CUP' in col and "MAX" not in col and "MIN" not in col and "MC" in col and "VAR" not in col]
+        altitudes = [int(col.split('_')[-1][:-1]) for col in wind_speed_columns]  # Extract altitudes from column names
+
+        wind_speeds = self.sar_product_meteo[wind_speed_columns].values  # Extract wind speed values 
+
+        idx = 5
+        # Sort altitudes and corresponding wind speeds
+        sorted_indices = np.argsort(altitudes)
+        altitudes = np.array(altitudes)[sorted_indices]
+        wind_speeds = wind_speeds[:, sorted_indices]
+        plt.plot(wind_speeds[idx,:], altitudes)
+
+        # Plot the fitted wind shear line
+        z1 = altitudes[0]
+        z2 = altitudes[-1]
+        WSPD_z1 = wind_speeds[0]
+        WSPD_z2 = wind_speeds[-1]
+        alpha = self.sar_product_meteo['wind_shear_exponent'].iloc[idx]
+
+        fitted_profile = WSPD_z1*(altitudes/z1)**alpha
+        plt.plot(fitted_profile,altitudes)   

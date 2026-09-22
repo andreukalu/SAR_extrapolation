@@ -13,5 +13,5 @@ sp = SARProcessor.SARProcessor(sar_src_path=config.sar_src_path,sar_dst_path=con
 sp.process_sar_files()
 
 # Merge datasets by assigning the closes measurement to each SAR measurement and generate a database dataframe
-db = Database.Database(config.db_path,sar_src_path=config.sar_dst_path,fino_src_path=config.fino_dst_path)
+db = Database.Database(config.db_path,sar_src_path=config.sar_dst_path,fino_src_path=config.fino_dst_path,images_path=config.images_path)
 db.merge_datasets()
