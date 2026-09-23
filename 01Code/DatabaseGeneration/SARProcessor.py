@@ -114,6 +114,43 @@ class SARProcessor:
             except:
                 print(f'Couldnt process file {file}')
 
+    def process_single_sar_file(self,filename):
+            """
+                Process a single SAR .nc file within src_path. Tiles at the coordinates of interest with dimensions
+                width and height are cutted out from the complete image, thus reducing the dataset weight.
+                
+                IMPORTANT! this function requires that fino_path is defined and pointing to the FINO1 dataframe
+            """
+    
+            # Get all the available files in src_path
+            file = os.path.join(self.src_path,filename)
+    
+            # Process each .nc SAR measurement file
+            print(f'Processing file {file}')
+            try:
+                # Read the .nc file
+                self.read_file(file)
+
+                # Cut the target tile to be processed
+                self.obtain_target_tile()
+
+                # Filter out objects in the tile such as ships or wind turbines
+                self.filter_objects(num_guard=20, num_ref=20, pfa=1e-3)
+
+                # Compute the 2D PSDs of the tile using the Welch method and periodogram method
+                # self.compute_welch_2D(tile_size=(128, 128), overlap=0.5, window='hamming', return_db=True)
+                self.compute_fft_2D()
+
+                self.compute_autocorr_2D()
+
+                # Delete the dataset containing the whole SAR image and only retain the cutted tile
+                del self.ds
+
+                # Save the processed tile
+                self.write_product(os.path.basename(file).split('.')[0])
+            except:
+                print(f'Couldnt process file {file}')
+
     def print_info(self):
             """
             Get the variable names and their dimensions from a NetCDF file.

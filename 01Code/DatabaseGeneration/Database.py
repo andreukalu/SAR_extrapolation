@@ -141,12 +141,39 @@ class Database:
 
         for index in self.db.index:
             print(f'Generating image {index}')
-            self.load_sar_product(index)
-            self.plot_scene(save_image=True,images_path=self.images_path)
-            self.plot_fft(save_image=True,images_path=self.images_path)
-            self.plot_fft(zoom=True,save_image=True,images_path=self.images_path)
-            self.plot_autocorr(save_image=True,images_path=self.images_path)
-            self.plot_autocorr(zoom=True,save_image=True,images_path=self.images_path)
+            try:
+                self.load_sar_product(index)
+                self.plot_scene(save_image=True,images_path=self.images_path)
+                self.plot_fft(save_image=True,images_path=self.images_path)
+                self.plot_fft(zoom=True,save_image=True,images_path=self.images_path)
+                self.plot_autocorr(save_image=True,images_path=self.images_path)
+                self.plot_autocorr(zoom=True,save_image=True,images_path=self.images_path)
+            except:
+                print('Some printing failed')
+            print(f'Image saved at {self.images_path}')
+
+    def generate_db_images_for_single_product(self,product_index,images_path=''):
+            """
+            Generates images for the whole database with scene images and FFT images
+    
+            Params:
+            images_path = String
+                Path to where the images will be stored
+            """
+    
+            if images_path != '':
+                self.images_path = images_path
+    
+            print(f'Generating image {product_index}')
+            try:
+                self.load_sar_product(product_index)
+                self.plot_scene(save_image=True,images_path=self.images_path)
+                self.plot_fft(save_image=True,images_path=self.images_path)
+                self.plot_fft(zoom=True,save_image=True,images_path=self.images_path)
+                self.plot_autocorr(save_image=True,images_path=self.images_path)
+                self.plot_autocorr(zoom=True,save_image=True,images_path=self.images_path)
+            except:
+                print('Some printing failed')
             print(f'Image saved at {self.images_path}')
 
     def plot_scene(self, var_name="Sigma0_VV_no_targets", clim_low=0, clim_high=0.1, normalize = True, save_image=False, images_path=''):
