@@ -63,7 +63,8 @@ class AtmosphericProcessor:
 
         self.internal_df["WSPD_z2"] = self.internal_df[self.z2_var_name]  # Set wind speed at z2 to the closest available value
         self.internal_df["RELH_z2"] = self.interpolate_variable('RELH', self.z2_closest)
-        self.internal_df[["TEMP_z1","TEMP_z2"]] = self.interpolate_variable('DRYT', [self.z1, self.z2_closest])
+        self.internal_df["TEMP_z2"] = self.interpolate_variable('DRYT', self.z2_closest)
+        self.internal_df["TEMP_z1"] = self.internal_df["TEMP_0m"]
         self.internal_df[["ATMP_z1","ATMP_z2"]] = self.interpolate_variable('ATMP', [self.z1, self.z2_closest])
         
         self.convert_to_kelvin()  # Convert temperature to Kelvin
