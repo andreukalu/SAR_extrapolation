@@ -6,6 +6,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import pandas as pd
 from scipy.ndimage import uniform_filter, maximum_filter
+from scipy.signal import detrend
 import glob
 import pickle
 import numpy as np
@@ -101,14 +102,14 @@ class SARProcessor:
                 self.filter_objects(num_guard=20, num_ref=20, pfa=1e-3)
 
                 # Compute the 2D PSDs of the tile using the Welch method and periodogram method
-                # self.compute_welch_2D(tile_size=(128, 128), overlap=0.5, window='hamming', return_db=True)
-                self.compute_fft_2D()
+                # self.compute_fft_2D()
+                self.compute_welch_2D(tile_size=(1024, 1024), overlap=0.4, window='hamming', return_db=True)
 
                 self.compute_autocorr_2D()
 
                 # Delete the dataset containing the whole SAR image and only retain the cutted tile
                 del self.ds
-
+                
                 # Save the processed tile
                 self.write_product(os.path.basename(file).split('.')[0])
             except:
@@ -528,7 +529,7 @@ class SARProcessor:
             return fft_da
     
 
-    def compute_welch_2D(self, var_name='Sigma0_VV_no_targets', spatial_dims=('y', 'x'), tile_size=(256, 256), overlap=0.5, window='hanning', return_db=True):
+    def compute_welch_2D(self, var_name='Sigma0_VV_no_targets', spatial_dims=('y', 'x'), tile_size=(256, 256), overlap=0.5, window='hanning', return_db=True, normalize=True):
         """
         Computes 2D Welch Power Spectral Density (PSD) on an xarray DataArray 
         and returns a DataArray with centered spatial frequency axes (cycles per unit) using the Welch method.
@@ -591,8 +592,15 @@ class SARProcessor:
                 tile = arr[y:y+ty, x:x+tx]
                 
                 # Remove DC offset per tile
-                tile_detrend = tile #- np.mean(tile)
-                
+                # tile_detrend = detrend(detrend(tile, axis=0, type='linear'),
+                #        axis=1, type='linear')
+                ty, tx = tile.shape
+                yy, xx = np.mgrid[0:ty, 0:tx]
+                A = np.column_stack([np.ones(ty*tx), yy.ravel(), xx.ravel()])
+                coeffs, *_ = np.linalg.lstsq(A, tile.ravel(), rcond=None)
+                plane = coeffs[0] + coeffs[1]*yy + coeffs[2]*xx
+
+                tile_detrend = tile - plane
                 # Apply 2D spatial window
                 tile_windowed = tile_detrend * win_2d
                 
@@ -610,6 +618,9 @@ class SARProcessor:
         psd_avg = psd_accumulator / tile_count
         psd_shifted = np.fft.fftshift(psd_avg)
 
+        if normalize:
+            psd_shifted = psd_shifted/np.max(psd_shifted)
+
         # Convert to dB scale if requested
         if return_db:
             psd_output = 10 * np.log10(psd_shifted + 1e-12)
@@ -618,7 +629,7 @@ class SARProcessor:
         else:
             psd_output = psd_shifted
             var_name = 'welch_psd'
-            unit_label = f"({self.tile_filtered.attrs.get('units', 'intensity')})^2 m^2"
+            unit_label = f"({self.tile.attrs.get('units', 'intensity')})^2 m^2"
 
         # 7. Calculate centered frequency axes (cycles per spatial unit)
         freq_y = np.fft.fftshift(np.fft.fftfreq(ty, d=dy))
