@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from scipy.ndimage import uniform_filter, maximum_filter
 from scipy.signal import detrend
+import scipy
 import glob
 import pickle
 import numpy as np
@@ -91,29 +92,31 @@ class SARProcessor:
         # Process each .nc SAR measurement file
         for file in files:
             print(f'Processing file {file}')
-            try:
-                # Read the .nc file
-                self.read_file(file)
+        # try:
+            # Read the .nc file
+            self.read_file(file)
 
-                # Cut the target tile to be processed
-                self.obtain_target_tile()
+            # Cut the target tile to be processed
+            self.obtain_target_tile()
 
-                # Filter out objects in the tile such as ships or wind turbines
-                self.filter_objects(num_guard=20, num_ref=20, pfa=1e-3)
+            # Filter out objects in the tile such as ships or wind turbines
+            self.filter_objects(num_guard=20, num_ref=20, pfa=1e-3)
 
-                # Compute the 2D PSDs of the tile using the Welch method and periodogram method
-                # self.compute_fft_2D()
-                self.compute_welch_2D(tile_size=(1024, 1024), overlap=0.4, window='hamming', return_db=True)
+            # Compute the 2D PSDs of the tile using the Welch method and periodogram method
+            # self.compute_fft_2D()
+            self.compute_welch_2D(tile_size=(1024, 1024), overlap=0.4, window='hamming', return_db=True)
 
-                self.compute_autocorr_2D()
+            self.compute_wavelet_2D()
 
-                # Delete the dataset containing the whole SAR image and only retain the cutted tile
-                del self.ds
-                
-                # Save the processed tile
-                self.write_product(os.path.basename(file).split('.')[0])
-            except:
-                print(f'Couldnt process file {file}')
+            self.compute_autocorr_2D()
+
+            # Delete the dataset containing the whole SAR image and only retain the cutted tile
+            del self.ds
+            
+            # Save the processed tile
+            self.write_product(os.path.basename(file).split('.')[0])
+        # except:
+            # print(f'Couldnt process file {file}')
 
     def process_single_sar_file(self,filename):
             """
@@ -186,6 +189,9 @@ class SARProcessor:
         
         # Add autocorr to the tile
         self.tile['autocorr'] = self.autocorr
+
+        # Add wavelet transform to the tile
+        self.tile.update(self.stats)
 
         # Save the tile pickle
         self.tile.to_netcdf(path)
@@ -654,6 +660,123 @@ class SARProcessor:
         self.psd = psd_da
         
         return psd_da
+
+    def compute_wavelet_2D(self,var_name='Sigma0_VV_no_targets',spatial_dims=('y', 'x'),n_octaves=6,scales_per_octave=2,n_angles=18,output_stride=16,sigma=6.0,k0=np.pi,detrend=True):
+        """
+        Computes a 2D directional Continuous Wavelet Transform (CWT) on the tile
+        using a rotated complex Morlet wavelet. Returns the transformed image.
+        """
+        dim_y, dim_x = spatial_dims
+        da = self.tile[var_name].transpose(dim_y, dim_x)
+        vals = da.values.astype(np.float32)
+        vals = np.where(np.isfinite(vals), vals, np.nanmean(vals))
+        vals -= vals.mean()
+        ny, nx = vals.shape
+
+        if detrend:
+            yy0, xx0 = np.mgrid[0:ny, 0:nx]
+            A = np.column_stack([np.ones(ny * nx, np.float32),
+                                yy0.ravel().astype(np.float32),
+                                xx0.ravel().astype(np.float32)])
+            coeffs, *_ = np.linalg.lstsq(A, vals.ravel(), rcond=None)
+            vals = vals - (A @ coeffs).reshape(ny, nx).astype(np.float32)
+
+        dy = float(self.tile.metadata.attrs['Abstracted_Metadata:azimuth_spacing'])
+        dx = float(self.tile.metadata.attrs['Abstracted_Metadata:range_spacing'])
+        spacing = 0.5 * (dx + dy)
+
+        # Scales directly in pixels: cover 0.5–5 km
+        s_min = 200 * k0 / (2.0 * np.pi * spacing)
+        s_max = 10000 * k0 / (2.0 * np.pi * spacing)
+        n_scales = n_octaves * scales_per_octave + 1
+        scales = np.geomspace(s_min, s_max, n_scales)
+        angles = np.linspace(0, np.pi, n_angles, endpoint=False)
+
+        # ---- FFT once ----
+        F = scipy.fft.fft2(vals, workers=-1)
+        ky = (2 * np.pi * np.fft.fftfreq(ny))[:, None].astype(np.float32)
+        kx = (2 * np.pi * np.fft.fftfreq(nx))[None, :].astype(np.float32)
+
+        # ---- Output grid: only sample every `output_stride` pixels ----
+        ys = np.arange(0, ny, output_stride)
+        xs = np.arange(0, nx, output_stride)
+        yy_s, xx_s = np.meshgrid(ys, xs, indexing='ij')
+
+        n_s, n_a = len(scales), len(angles)
+        amp = np.zeros((n_s, n_a, len(ys), len(xs)), dtype=np.float32)
+
+        n_s, n_a = len(scales), len(angles)
+
+        sum_amp     = np.zeros((n_s, n_a), dtype=np.float64)
+        sum_amp_sq  = np.zeros((n_s, n_a), dtype=np.float64)
+        sum_phase2  = np.zeros((n_s, n_a), dtype=np.complex128)  # for Γ
+        pixel_count = 0
+        for i_s, scale in enumerate(scales):
+            for i_a, theta in enumerate(angles):
+                ct, st = np.cos(theta), np.sin(theta)
+                k_par  =  ct * kx + st * ky
+                k_perp = -st * kx + ct * ky
+                k_r    = np.sqrt(k_par**2 + k_perp**2)
+
+                psi_hat = scale * np.exp(
+                    -0.5 * sigma**2 * ((scale * k_par - k0)**2 + (scale * k_perp)**2)
+                )
+
+                W = scipy.fft.ifft2(F * np.conj(psi_hat), workers=-1)
+
+                W_sub = W[yy_s, xx_s]                    # subsample once
+                A_sub = np.abs(W_sub).astype(np.float32)
+
+                amp[i_s, i_a]        = A_sub
+                sum_amp[i_s, i_a]    = A_sub.mean()
+                sum_amp_sq[i_s, i_a] = (A_sub ** 2).mean()
+
+                phase2 = np.exp(1j * 2.0 * np.angle(W_sub))   # phase of COMPLEX W_sub
+                sum_phase2[i_s, i_a] = phase2.mean()
+
+        # --- 1. Orientation-resolved mean amplitude ---
+        theta_best_idx  = np.argmax(sum_amp, axis=1)                      # (n_s,)
+        A_best          = sum_amp[np.arange(n_s), theta_best_idx]         # (n_s,)
+        A_median_theta  = np.median(sum_amp, axis=1)                      # (n_s,)
+        anisotropy      = A_best / (A_median_theta + 1e-12)               # (n_s,)
+        scale_contrast  = A_best / (np.median(A_best) + 1e-12)            # (n_s,)
+        gamma_per_scale     = np.abs(sum_phase2[np.arange(n_s), theta_best_idx])  # (n_s,)
+        theta_deg_per_scale = np.rad2deg(angles[theta_best_idx])                 # (n_s,)
+        lambda_per_scale    = 2.0 * np.pi * scales * spacing / k0                # (n_s,)
+
+        scale_best_idx = int(np.argmax(A_best))
+
+        stats = xr.Dataset(
+            data_vars={
+                'mean_amplitude':   (('scale', 'angle'), sum_amp),
+                'A_best':           (('scale',),         A_best),
+                'A_median_theta':   (('scale',),         A_median_theta),
+                'anisotropy':       (('scale',),         anisotropy),
+                'scale_contrast':   (('scale',),         scale_contrast),
+                'gamma':            (('scale',),         gamma_per_scale),
+                'theta_best_idx':   (('scale',),         theta_best_idx),
+                'theta_deg':        (('scale',),         theta_deg_per_scale),
+                'wavelength_m':     (('scale',),         lambda_per_scale),
+            },
+            coords={'scale': scales, 'angle': angles},
+            attrs={
+                'scale_best_idx':     scale_best_idx,
+                'theta_best_deg':     float(theta_deg_per_scale[scale_best_idx]),
+                'wavelength_best_m':  float(lambda_per_scale[scale_best_idx]),
+                'gamma_best':         float(gamma_per_scale[scale_best_idx]),
+                'anisotropy_best':    float(anisotropy[scale_best_idx]),
+                'scale_contrast_best': float(scale_contrast[scale_best_idx]),
+                'spacing_m':          float(spacing),
+                'dx_m':               dx,
+                'dy_m':               dy,
+                'sigma':              sigma,
+                'k0':                 k0,
+                'source_var':         var_name,
+            },
+        )
+        self.stats = stats
+        return stats
+
 
     def compute_autocorr_2D(self, var_name="Sigma0_VV_no_targets", spatial_dims=("y", "x"), filter=True, normalize=True):
         """Computes 2D Autocorrelation on an xarray DataArray via FFT and returns
