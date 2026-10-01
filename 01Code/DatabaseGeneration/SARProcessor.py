@@ -8,6 +8,7 @@ import pandas as pd
 from scipy.ndimage import uniform_filter, maximum_filter
 from scipy.signal import detrend
 import scipy
+import traceback
 import glob
 import pickle
 import numpy as np
@@ -92,31 +93,34 @@ class SARProcessor:
         # Process each .nc SAR measurement file
         for file in files:
             print(f'Processing file {file}')
-        # try:
-            # Read the .nc file
-            self.read_file(file)
+            try:
+                # Read the .nc file
+                self.read_file(file)
 
-            # Cut the target tile to be processed
-            self.obtain_target_tile()
+                # Cut the target tile to be processed
+                self.obtain_target_tile()
 
-            # Filter out objects in the tile such as ships or wind turbines
-            self.filter_objects(num_guard=20, num_ref=20, pfa=1e-3)
+                # Filter out objects in the tile such as ships or wind turbines
+                self.filter_objects(num_guard=20, num_ref=20, pfa=1e-3)
 
-            # Compute the 2D PSDs of the tile using the Welch method and periodogram method
-            # self.compute_fft_2D()
-            self.compute_welch_2D(tile_size=(1024, 1024), overlap=0.4, window='hamming', return_db=True)
+                # Compute the 2D PSDs of the tile using the Welch method and periodogram method
+                # self.compute_fft_2D()
+                self.compute_welch_2D(tile_size=(1024, 1024), overlap=0.4, window='hamming', return_db=True)
 
-            self.compute_wavelet_2D()
+                self.compute_wavelet_2D()
 
-            self.compute_autocorr_2D()
+                self.compute_autocorr_2D()
 
-            # Delete the dataset containing the whole SAR image and only retain the cutted tile
-            del self.ds
-            
-            # Save the processed tile
-            self.write_product(os.path.basename(file).split('.')[0])
-        # except:
-        #     print(f'Couldnt process file {file}')
+                # Delete the dataset containing the whole SAR image and only retain the cutted tile
+                del self.ds
+                
+                # Save the processed tile
+                self.write_product(os.path.basename(file).split('.')[0])
+            except Exception as e:
+                print(f'Could not process file {file}')
+                print(f'Error: {type(e).__name__}: {e}')
+                traceback.print_exc()
+                continue   # if inside a loop
 
     def process_single_sar_file(self,filename):
             """
@@ -143,17 +147,20 @@ class SARProcessor:
 
                 # Compute the 2D PSDs of the tile using the Welch method and periodogram method
                 # self.compute_welch_2D(tile_size=(128, 128), overlap=0.5, window='hamming', return_db=True)
-                self.compute_fft_2D()
+                self.compute_welch_2D(tile_size=(1024, 1024), overlap=0.4, window='hamming', return_db=True)
+                
+                self.compute_wavelet_2D()
 
                 self.compute_autocorr_2D()
-
                 # Delete the dataset containing the whole SAR image and only retain the cutted tile
                 del self.ds
 
                 # Save the processed tile
                 self.write_product(os.path.basename(file).split('.')[0])
-            except:
-                print(f'Couldnt process file {file}')
+            except Exception as e:
+                print(f'Could not process file {file}')
+                print(f'Error: {type(e).__name__}: {e}')
+                traceback.print_exc()
 
     def print_info(self):
             """
@@ -661,7 +668,7 @@ class SARProcessor:
         
         return psd_da
 
-    def compute_wavelet_2D(self,var_name='Sigma0_VV_no_targets',spatial_dims=('y', 'x'),n_octaves=6,scales_per_octave=2,n_angles=18,output_stride=16,sigma=6.0,k0=np.pi,detrend=False):
+    def compute_wavelet_2D(self,var_name='Sigma0_VV_no_targets',spatial_dims=('y', 'x'),n_octaves=6,scales_per_octave=2,n_angles=18,output_stride=16,sigma=6.0,k0=np.pi,detrend=True):
         """
         Computes a 2D directional Continuous Wavelet Transform (CWT) on the tile
         using a rotated complex Morlet wavelet. Returns the transformed image.
@@ -673,13 +680,22 @@ class SARProcessor:
         vals -= vals.mean()
         ny, nx = vals.shape
 
+        # if detrend:
+        #     yy0, xx0 = np.mgrid[0:ny, 0:nx]
+        #     A = np.column_stack([np.ones(ny * nx, np.float32),
+        #                         yy0.ravel().astype(np.float32),
+        #                         xx0.ravel().astype(np.float32)])
+        #     coeffs, *_ = np.linalg.lstsq(A, vals.ravel(), rcond=None)
+        #     vals = vals - (A @ coeffs).reshape(ny, nx).astype(np.float32)
+
         if detrend:
-            yy0, xx0 = np.mgrid[0:ny, 0:nx]
-            A = np.column_stack([np.ones(ny * nx, np.float32),
-                                yy0.ravel().astype(np.float32),
-                                xx0.ravel().astype(np.float32)])
-            coeffs, *_ = np.linalg.lstsq(A, vals.ravel(), rcond=None)
-            vals = vals - (A @ coeffs).reshape(ny, nx).astype(np.float32)
+            F_detrend = scipy.fft.fft2(vals, workers=-1)
+            ky_d = (2 * np.pi * np.fft.fftfreq(ny))[:, None]
+            kx_d = (2 * np.pi * np.fft.fftfreq(nx))[None, :]
+            k_mag = np.sqrt(kx_d**2 + ky_d**2)
+            k_cutoff = 2 * np.pi / 5000.0    # remove scales larger than 5 km
+            F_detrend *= 1.0 - np.exp(-0.5 * (k_mag / k_cutoff)**2)
+            vals = np.real(scipy.fft.ifft2(F_detrend, workers=-1)).astype(np.float32)
 
         # Obtain x and y sampling intervals
         dy = float(self.tile.metadata.attrs['Abstracted_Metadata:azimuth_spacing'])
@@ -690,7 +706,7 @@ class SARProcessor:
         
         # Obtain the scaling factor for the wavelets with wavelengths that go between 200 m and 10000 m. This is according to lambda = 2*pi/k * s * spacing
         s_min = 200 * k0 / (2.0 * np.pi * spacing)
-        s_max = 10000 * k0 / (2.0 * np.pi * spacing)
+        s_max = 5000 * k0 / (2.0 * np.pi * spacing)
         n_scales = n_octaves * scales_per_octave + 1
         scales = np.geomspace(s_min, s_max, n_scales)
         angles = np.linspace(0, np.pi, n_angles, endpoint=False)
@@ -756,7 +772,7 @@ class SARProcessor:
                 phi_demod = phi - carrier_phase
 
                 # 4. Average the unit phasors and take the modulus
-                sum_phase2[i_s, i_a] = np.abs(np.exp(1j * phi_demod).mean())
+                sum_phase2[i_s, i_a] = np.abs(np.exp(1j * 2.0 * phi_demod).mean())
 
         # Obtantion of statistics
         theta_best_idx  = np.argmax(sum_amp, axis=1)                      # The index of the angle with highest amplitudes
