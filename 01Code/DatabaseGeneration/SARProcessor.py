@@ -92,31 +92,31 @@ class SARProcessor:
         # Process each .nc SAR measurement file
         for file in files:
             print(f'Processing file {file}')
-            try:
-                # Read the .nc file
-                self.read_file(file)
+        # try:
+            # Read the .nc file
+            self.read_file(file)
 
-                # Cut the target tile to be processed
-                self.obtain_target_tile()
+            # Cut the target tile to be processed
+            self.obtain_target_tile()
 
-                # Filter out objects in the tile such as ships or wind turbines
-                self.filter_objects(num_guard=20, num_ref=20, pfa=1e-3)
+            # Filter out objects in the tile such as ships or wind turbines
+            self.filter_objects(num_guard=20, num_ref=20, pfa=1e-3)
 
-                # Compute the 2D PSDs of the tile using the Welch method and periodogram method
-                # self.compute_fft_2D()
-                self.compute_welch_2D(tile_size=(1024, 1024), overlap=0.4, window='hamming', return_db=True)
+            # Compute the 2D PSDs of the tile using the Welch method and periodogram method
+            # self.compute_fft_2D()
+            self.compute_welch_2D(tile_size=(1024, 1024), overlap=0.4, window='hamming', return_db=True)
 
-                self.compute_wavelet_2D()
+            self.compute_wavelet_2D()
 
-                self.compute_autocorr_2D()
+            self.compute_autocorr_2D()
 
-                # Delete the dataset containing the whole SAR image and only retain the cutted tile
-                del self.ds
-                
-                # Save the processed tile
-                self.write_product(os.path.basename(file).split('.')[0])
-            except:
-                print(f'Couldnt process file {file}')
+            # Delete the dataset containing the whole SAR image and only retain the cutted tile
+            del self.ds
+            
+            # Save the processed tile
+            self.write_product(os.path.basename(file).split('.')[0])
+        # except:
+        #     print(f'Couldnt process file {file}')
 
     def process_single_sar_file(self,filename):
             """
@@ -661,7 +661,7 @@ class SARProcessor:
         
         return psd_da
 
-    def compute_wavelet_2D(self,var_name='Sigma0_VV_no_targets',spatial_dims=('y', 'x'),n_octaves=6,scales_per_octave=2,n_angles=18,output_stride=16,sigma=6.0,k0=np.pi,detrend=True):
+    def compute_wavelet_2D(self,var_name='Sigma0_VV_no_targets',spatial_dims=('y', 'x'),n_octaves=6,scales_per_octave=2,n_angles=18,output_stride=16,sigma=6.0,k0=np.pi,detrend=False):
         """
         Computes a 2D directional Continuous Wavelet Transform (CWT) on the tile
         using a rotated complex Morlet wavelet. Returns the transformed image.
@@ -687,7 +687,7 @@ class SARProcessor:
 
         # Obtain spacing as the average between dx and dy
         spacing = (dx + dy) / 2
-
+        
         # Obtain the scaling factor for the wavelets with wavelengths that go between 200 m and 10000 m. This is according to lambda = 2*pi/k * s * spacing
         s_min = 200 * k0 / (2.0 * np.pi * spacing)
         s_max = 10000 * k0 / (2.0 * np.pi * spacing)
@@ -713,6 +713,7 @@ class SARProcessor:
         sum_amp     = np.zeros((n_s, n_a), dtype=np.float64)
         sum_amp_sq  = np.zeros((n_s, n_a), dtype=np.float64)
         sum_phase2  = np.zeros((n_s, n_a), dtype=np.complex128)  # for Γ
+        
         pixel_count = 0
         for i_s, scale in enumerate(scales):
             for i_a, theta in enumerate(angles):
@@ -726,6 +727,9 @@ class SARProcessor:
                 psi_hat = scale * np.exp(
                     -0.5 * sigma**2 * ((scale * k_par - k0)**2 + (scale * k_perp)**2)
                 )
+                
+                # Enforce analyticity: kill the negative-frequency lobe. Make the wavelet complex in space domain
+                psi_hat = np.where(k_par > 0, psi_hat, 0.0)
 
                 # Obtain the wavelet transform as the correlation in time between the wavelet and the signal. That's why the conjugate
                 W = scipy.fft.ifft2(F * np.conj(psi_hat), workers=-1)
@@ -739,9 +743,20 @@ class SARProcessor:
                 sum_amp[i_s, i_a]    = A_sub.mean()
                 sum_amp_sq[i_s, i_a] = (A_sub ** 2).mean()
 
-                # Obtain the mean phase of the W_sub for computation of gamma
-                phase2 = np.exp(1j * 2.0 * np.angle(W_sub))   # phase of COMPLEX W_sub
-                sum_phase2[i_s, i_a] = phase2.mean()
+                # Phase-gradient coherence
+                # 1. Get the phase of the CWT
+                phi = np.angle(W_sub)
+
+                # 2. Compute the expected carrier phase at each pixel
+                carrier_phase = (k0 / scale) * (
+                    xx_s * np.cos(theta) + yy_s * np.sin(theta)
+                )
+
+                # 3. Demodulate
+                phi_demod = phi - carrier_phase
+
+                # 4. Average the unit phasors and take the modulus
+                sum_phase2[i_s, i_a] = np.abs(np.exp(1j * phi_demod).mean())
 
         # Obtantion of statistics
         theta_best_idx  = np.argmax(sum_amp, axis=1)                      # The index of the angle with highest amplitudes
@@ -749,7 +764,8 @@ class SARProcessor:
         A_median_theta  = np.median(sum_amp, axis=1)                      # The median amplitude of all amplitudes
         anisotropy      = A_best / (A_median_theta + 1e-12)               # The anisotropy with respect to the mean value
         scale_contrast  = A_best / (np.median(A_best) + 1e-12)            # Analogy of anisotropy but at the dominant angle
-        gamma_per_scale     = np.abs(sum_phase2[np.arange(n_s), theta_best_idx])  # Measures the coherence of the obtained structure [0 (minimum) to 1 (maximum)]
+        
+        gamma_per_scale = np.abs(sum_phase2[np.arange(n_s), theta_best_idx])  # Measures the coherence of the obtained structure [0 (minimum) to 1 (maximum)]
                                                                                   # High coherence means that all values in the wavelet image have the same phase
         theta_deg_per_scale = np.rad2deg(angles[theta_best_idx])                 # Obtain the angle of the dominant structure at each scale
         lambda_per_scale    = 2.0 * np.pi * scales * spacing / k0                # Obtain the wavelength of all scales
