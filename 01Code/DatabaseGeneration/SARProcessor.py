@@ -92,31 +92,31 @@ class SARProcessor:
         # Process each .nc SAR measurement file
         for file in files:
             print(f'Processing file {file}')
-        # try:
-            # Read the .nc file
-            self.read_file(file)
+            try:
+                # Read the .nc file
+                self.read_file(file)
 
-            # Cut the target tile to be processed
-            self.obtain_target_tile()
+                # Cut the target tile to be processed
+                self.obtain_target_tile()
 
-            # Filter out objects in the tile such as ships or wind turbines
-            self.filter_objects(num_guard=20, num_ref=20, pfa=1e-3)
+                # Filter out objects in the tile such as ships or wind turbines
+                self.filter_objects(num_guard=20, num_ref=20, pfa=1e-3)
 
-            # Compute the 2D PSDs of the tile using the Welch method and periodogram method
-            # self.compute_fft_2D()
-            self.compute_welch_2D(tile_size=(1024, 1024), overlap=0.4, window='hamming', return_db=True)
+                # Compute the 2D PSDs of the tile using the Welch method and periodogram method
+                # self.compute_fft_2D()
+                self.compute_welch_2D(tile_size=(1024, 1024), overlap=0.4, window='hamming', return_db=True)
 
-            self.compute_wavelet_2D()
+                self.compute_wavelet_2D()
 
-            self.compute_autocorr_2D()
+                self.compute_autocorr_2D()
 
-            # Delete the dataset containing the whole SAR image and only retain the cutted tile
-            del self.ds
-            
-            # Save the processed tile
-            self.write_product(os.path.basename(file).split('.')[0])
-        # except:
-            # print(f'Couldnt process file {file}')
+                # Delete the dataset containing the whole SAR image and only retain the cutted tile
+                del self.ds
+                
+                # Save the processed tile
+                self.write_product(os.path.basename(file).split('.')[0])
+            except:
+                print(f'Couldnt process file {file}')
 
     def process_single_sar_file(self,filename):
             """
@@ -681,70 +681,80 @@ class SARProcessor:
             coeffs, *_ = np.linalg.lstsq(A, vals.ravel(), rcond=None)
             vals = vals - (A @ coeffs).reshape(ny, nx).astype(np.float32)
 
+        # Obtain x and y sampling intervals
         dy = float(self.tile.metadata.attrs['Abstracted_Metadata:azimuth_spacing'])
         dx = float(self.tile.metadata.attrs['Abstracted_Metadata:range_spacing'])
-        spacing = 0.5 * (dx + dy)
 
-        # Scales directly in pixels: cover 0.5–5 km
+        # Obtain spacing as the average between dx and dy
+        spacing = (dx + dy) / 2
+
+        # Obtain the scaling factor for the wavelets with wavelengths that go between 200 m and 10000 m. This is according to lambda = 2*pi/k * s * spacing
         s_min = 200 * k0 / (2.0 * np.pi * spacing)
         s_max = 10000 * k0 / (2.0 * np.pi * spacing)
         n_scales = n_octaves * scales_per_octave + 1
         scales = np.geomspace(s_min, s_max, n_scales)
         angles = np.linspace(0, np.pi, n_angles, endpoint=False)
 
-        # ---- FFT once ----
+        # Compute the FFT of the measured values
         F = scipy.fft.fft2(vals, workers=-1)
         ky = (2 * np.pi * np.fft.fftfreq(ny))[:, None].astype(np.float32)
         kx = (2 * np.pi * np.fft.fftfreq(nx))[None, :].astype(np.float32)
 
-        # ---- Output grid: only sample every `output_stride` pixels ----
+        # Generate the meshgrid for the obtained wavelet transform outputs
         ys = np.arange(0, ny, output_stride)
         xs = np.arange(0, nx, output_stride)
         yy_s, xx_s = np.meshgrid(ys, xs, indexing='ij')
 
+        # Preallocate the memory for the scales, angles, and amplitudes
         n_s, n_a = len(scales), len(angles)
         amp = np.zeros((n_s, n_a, len(ys), len(xs)), dtype=np.float32)
 
-        n_s, n_a = len(scales), len(angles)
-
+        # Preallocate the memory for the statistics vectors
         sum_amp     = np.zeros((n_s, n_a), dtype=np.float64)
         sum_amp_sq  = np.zeros((n_s, n_a), dtype=np.float64)
         sum_phase2  = np.zeros((n_s, n_a), dtype=np.complex128)  # for Γ
         pixel_count = 0
         for i_s, scale in enumerate(scales):
             for i_a, theta in enumerate(angles):
+                # Generate the wavenumbers parallel and perpendicular to the wavelet
                 ct, st = np.cos(theta), np.sin(theta)
                 k_par  =  ct * kx + st * ky
                 k_perp = -st * kx + ct * ky
                 k_r    = np.sqrt(k_par**2 + k_perp**2)
 
+                # Obtain the fourier transform of the wavelet function
                 psi_hat = scale * np.exp(
                     -0.5 * sigma**2 * ((scale * k_par - k0)**2 + (scale * k_perp)**2)
                 )
 
+                # Obtain the wavelet transform as the correlation in time between the wavelet and the signal. That's why the conjugate
                 W = scipy.fft.ifft2(F * np.conj(psi_hat), workers=-1)
 
+                # Subsample the wavelet transform since we are interested in the low frequency components. Complies with Nyquist limit
                 W_sub = W[yy_s, xx_s]                    # subsample once
                 A_sub = np.abs(W_sub).astype(np.float32)
 
+                # Obtain the statistics
                 amp[i_s, i_a]        = A_sub
                 sum_amp[i_s, i_a]    = A_sub.mean()
                 sum_amp_sq[i_s, i_a] = (A_sub ** 2).mean()
 
+                # Obtain the mean phase of the W_sub for computation of gamma
                 phase2 = np.exp(1j * 2.0 * np.angle(W_sub))   # phase of COMPLEX W_sub
                 sum_phase2[i_s, i_a] = phase2.mean()
 
-        # --- 1. Orientation-resolved mean amplitude ---
-        theta_best_idx  = np.argmax(sum_amp, axis=1)                      # (n_s,)
-        A_best          = sum_amp[np.arange(n_s), theta_best_idx]         # (n_s,)
-        A_median_theta  = np.median(sum_amp, axis=1)                      # (n_s,)
-        anisotropy      = A_best / (A_median_theta + 1e-12)               # (n_s,)
-        scale_contrast  = A_best / (np.median(A_best) + 1e-12)            # (n_s,)
-        gamma_per_scale     = np.abs(sum_phase2[np.arange(n_s), theta_best_idx])  # (n_s,)
-        theta_deg_per_scale = np.rad2deg(angles[theta_best_idx])                 # (n_s,)
-        lambda_per_scale    = 2.0 * np.pi * scales * spacing / k0                # (n_s,)
+        # Obtantion of statistics
+        theta_best_idx  = np.argmax(sum_amp, axis=1)                      # The index of the angle with highest amplitudes
+        A_best          = sum_amp[np.arange(n_s), theta_best_idx]         # The highest amplitudes for each scale
+        A_median_theta  = np.median(sum_amp, axis=1)                      # The median amplitude of all amplitudes
+        anisotropy      = A_best / (A_median_theta + 1e-12)               # The anisotropy with respect to the mean value
+        scale_contrast  = A_best / (np.median(A_best) + 1e-12)            # Analogy of anisotropy but at the dominant angle
+        gamma_per_scale     = np.abs(sum_phase2[np.arange(n_s), theta_best_idx])  # Measures the coherence of the obtained structure [0 (minimum) to 1 (maximum)]
+                                                                                  # High coherence means that all values in the wavelet image have the same phase
+        theta_deg_per_scale = np.rad2deg(angles[theta_best_idx])                 # Obtain the angle of the dominant structure at each scale
+        lambda_per_scale    = 2.0 * np.pi * scales * spacing / k0                # Obtain the wavelength of all scales
 
-        scale_best_idx = int(np.argmax(A_best))
+        scale_best_idx = int(np.argmax(A_best))                            # Find the dominant scale
 
         stats = xr.Dataset(
             data_vars={
