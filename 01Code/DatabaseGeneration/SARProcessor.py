@@ -79,7 +79,7 @@ class SARProcessor:
         self.height = height
 
     ############## METHODS ############
-    def process_sar_files(self):
+    def process_sar_files(self, psd = True, autocorr = False, wavelet = False):
         """
             Process the SAR .nc files within src_path. Tiles at the coordinates of interest with dimensions
             width and height are cutted out from the complete image, thus reducing the dataset weight.
@@ -105,24 +105,27 @@ class SARProcessor:
 
                 # Compute the 2D PSDs of the tile using the Welch method and periodogram method
                 # self.compute_fft_2D()
-                self.compute_welch_2D(tile_size=(1024, 1024), overlap=0.4, window='hamming', return_db=True)
+                if psd:
+                    self.compute_welch_2D(tile_size=(1024, 1024), overlap=0.4, window='hamming', return_db=True)
 
-                self.compute_wavelet_2D()
+                if wavelet:
+                    self.compute_wavelet_2D()
 
-                self.compute_autocorr_2D()
+                if autocorr:
+                    self.compute_autocorr_2D()
 
                 # Delete the dataset containing the whole SAR image and only retain the cutted tile
                 del self.ds
                 
                 # Save the processed tile
-                self.write_product(os.path.basename(file).split('.')[0])
+                self.write_product(os.path.basename(file).split('.')[0], psd=psd, autocorr=autocorr, wavelet=wavelet)
             except Exception as e:
                 print(f'Could not process file {file}')
                 print(f'Error: {type(e).__name__}: {e}')
                 traceback.print_exc()
                 continue   # if inside a loop
 
-    def process_single_sar_file(self,filename):
+    def process_single_sar_file(self,filename,psd=True,autocorr=False,wavelet=False):
             """
                 Process a single SAR .nc file within src_path. Tiles at the coordinates of interest with dimensions
                 width and height are cutted out from the complete image, thus reducing the dataset weight.
@@ -147,16 +150,19 @@ class SARProcessor:
 
                 # Compute the 2D PSDs of the tile using the Welch method and periodogram method
                 # self.compute_welch_2D(tile_size=(128, 128), overlap=0.5, window='hamming', return_db=True)
-                self.compute_welch_2D(tile_size=(1024, 1024), overlap=0.4, window='hamming', return_db=True)
+                if psd:
+                    self.compute_welch_2D(tile_size=(1024, 1024), overlap=0.4, window='hamming', return_db=True)
                 
-                self.compute_wavelet_2D()
+                if wavelet:
+                    self.compute_wavelet_2D()
 
-                self.compute_autocorr_2D()
+                if autocorr:
+                    self.compute_autocorr_2D()
                 # Delete the dataset containing the whole SAR image and only retain the cutted tile
                 del self.ds
 
                 # Save the processed tile
-                self.write_product(os.path.basename(file).split('.')[0])
+                self.write_product(os.path.basename(file).split('.')[0], psd=psd, autocorr=autocorr, wavelet=wavelet)
             except Exception as e:
                 print(f'Could not process file {file}')
                 print(f'Error: {type(e).__name__}: {e}')
@@ -179,7 +185,7 @@ class SARProcessor:
                 var_info = {var: (dataset.variables[var].dimensions, dataset.variables[var].shape) for var in dataset.variables}
             print(var_info)
 
-    def write_product(self,filename):
+    def write_product(self,filename,psd=True,autocorr=False,wavelet=False):
         """
             Function to save processed tiles as pickles
         
@@ -190,15 +196,23 @@ class SARProcessor:
 
         # Create the pickle path
         path = os.path.join(self.sar_dst_path,filename+'.nc')
-
+    
         # Add psd to the tile
-        self.tile['psd'] = self.psd
+        if psd:
+            self.tile['psd'] = self.psd
+            self.tile['phase_coherence'] = self.phase_coherence
+            self.tile['max_component'] = self.max_component
+            self.tile['anisotropy'] = self.anisotropy
+            self.tile['phase_coherence_max'] = self.phase_coherence_max
+            self.tile['f_bins'] = self.f_bins
         
         # Add autocorr to the tile
-        self.tile['autocorr'] = self.autocorr
+        if autocorr:
+            self.tile['autocorr'] = self.autocorr
 
         # Add wavelet transform to the tile
-        self.tile.update(self.stats)
+        if wavelet:
+            self.tile.update(self.stats)
 
         # Save the tile pickle
         self.tile.to_netcdf(path)
@@ -542,7 +556,7 @@ class SARProcessor:
             return fft_da
     
 
-    def compute_welch_2D(self, var_name='Sigma0_VV_no_targets', spatial_dims=('y', 'x'), tile_size=(256, 256), overlap=0.5, window='hanning', return_db=True, normalize=True):
+    def compute_welch_2D(self, var_name='Sigma0_VV_no_targets', spatial_dims=('y', 'x'), tile_size=(256, 256), overlap=0.5, window='hanning', return_db=True, normalize=True, f_bins=np.arange(1e-4, 5e-3, 1e-4)):
         """
         Computes 2D Welch Power Spectral Density (PSD) on an xarray DataArray 
         and returns a DataArray with centered spatial frequency axes (cycles per unit) using the Welch method.
@@ -600,6 +614,8 @@ class SARProcessor:
         psd_accumulator = np.zeros((ty, tx), dtype=np.float64)
         tile_count = 0
 
+        # Preallocate phase array
+        phi2_accumulator = np.zeros((ty, tx), dtype=np.complex128)
         for y in range(0, ny - ty + 1, step_y):
             for x in range(0, nx - tx + 1, step_x):
                 tile = arr[y:y+ty, x:x+tx]
@@ -607,7 +623,6 @@ class SARProcessor:
                 # Remove DC offset per tile
                 # tile_detrend = detrend(detrend(tile, axis=0, type='linear'),
                 #        axis=1, type='linear')
-                ty, tx = tile.shape
                 yy, xx = np.mgrid[0:ty, 0:tx]
                 A = np.column_stack([np.ones(ty*tx), yy.ravel(), xx.ravel()])
                 coeffs, *_ = np.linalg.lstsq(A, tile.ravel(), rcond=None)
@@ -619,9 +634,11 @@ class SARProcessor:
                 
                 # 2D FFT & Power calculation
                 fft2_tile = np.fft.fft2(tile_windowed)
+                phi2_tile = np.angle(fft2_tile) - 2*np.pi*(np.fft.fftfreq(ty)[:, None] * y + np.fft.fftfreq(tx)[None, :] * x)
                 power_tile = (np.abs(fft2_tile)**2) / win_norm
                 
                 psd_accumulator += power_tile
+                phi2_accumulator += np.exp(1j * phi2_tile)
                 tile_count += 1
 
         if tile_count == 0:
@@ -629,7 +646,9 @@ class SARProcessor:
 
         # 6. Average across tiles and shift zero-frequency (DC) component to center
         psd_avg = psd_accumulator / tile_count
+        phase_coherence = np.abs(phi2_accumulator / tile_count) ** 2
         psd_shifted = np.fft.fftshift(psd_avg)
+        phase_coherence_shifted = np.fft.fftshift(phase_coherence)
 
         if normalize:
             psd_shifted = psd_shifted/np.max(psd_shifted)
@@ -655,7 +674,21 @@ class SARProcessor:
             dims=['freq_y', 'freq_x'],
             name=var_name
         )
+
+        phase_coherence_da = xr.DataArray(
+            phase_coherence_shifted,
+            coords={'freq_y': freq_y, 'freq_x': freq_x},
+            dims=['freq_y', 'freq_x'],
+            name=var_name
+        )
         
+        self.phase_coherence = phase_coherence_da
+        self.psd = psd_da
+
+        max_component = self.compute_max_psd_component_f(f_bins)
+        anisotropy = self.compute_anisotropy_f(f_bins)
+        phase_coherence_max = self.compute_phase_coherence_f(f_bins)
+
         # Preserve metadata attributes
         psd_da.attrs['units'] = unit_label
         psd_da.freq_y.attrs['units'] = '1/m'
@@ -663,10 +696,99 @@ class SARProcessor:
         psd_da.attrs['tile_size'] = f"{ty}x{tx}"
         psd_da.attrs['overlap'] = f"{int(overlap*100)}%"
         psd_da.attrs['num_tiles_averaged'] = tile_count
-
+        
         self.psd = psd_da
+        self.phase_coherence = phase_coherence_da
+        self.max_component = max_component
+        self.anisotropy = anisotropy
+        self.phase_coherence_max = phase_coherence_max
+        self.f_bins = f_bins
         
         return psd_da
+
+    def compute_max_psd_component_f(self, f_bins=np.arange(1e-4, 5e-3, 1e-4)):
+            """
+            Computes the anisotropy factor f from the 2D PSD DataArray.
+    
+            Params:
+            psd_da : xr.DataArray
+                2D Power Spectral Density DataArray with dimensions ('freq_y', 'freq_x').
+    
+            Returns:
+            anisotropy : float
+                Anisotropy vector, defined as the ratio of the maximum to minimum PSD values for each frequency.
+            """
+            f = np.sqrt(self.psd['freq_x']**2 + self.psd['freq_y']**2)
+            psd_values = self.psd.values
+    
+            # Bin the PSD values based on the radial frequency
+            max_component = np.zeros_like(f_bins[:-1])
+            for i, (f_min, f_max) in enumerate(zip(f_bins[:-1], f_bins[1:])):
+                mask = (f >= f_min) & (f < f_max)
+                psd_bin = psd_values[mask]
+                if len(psd_bin) > 0:
+                    max_component[i] = np.max(psd_bin)
+    
+            return max_component
+    
+    def compute_anisotropy_f(self, f_bins=np.arange(1e-4, 5e-3, 1e-4)):
+        """
+        Computes the anisotropy factor f from the 2D PSD DataArray.
+
+        Params:
+        psd_da : xr.DataArray
+            2D Power Spectral Density DataArray with dimensions ('freq_y', 'freq_x').
+
+        Returns:
+        anisotropy : float
+            Anisotropy vector, defined as the ratio of the maximum to minimum PSD values for each frequency.
+        """
+        f = np.sqrt(self.psd['freq_x']**2 + self.psd['freq_y']**2)
+        psd_values = self.psd.values
+
+        # Bin the PSD values based on the radial frequency
+        anisotropy = np.zeros_like(f_bins[:-1])
+        for i, (f_min, f_max) in enumerate(zip(f_bins[:-1], f_bins[1:])):
+            mask = (f >= f_min) & (f < f_max)
+            psd_bin = psd_values[mask]
+            psd_bin = 10 ** (psd_bin / 10)  # Convert from dB to linear scale
+            if len(psd_bin) > 0:
+                anisotropy[i] = (np.max(psd_bin) - np.min(psd_bin)) / (np.max(psd_bin) + np.min(psd_bin))
+
+        return anisotropy
+
+    def compute_phase_coherence_f(self, f_bins=np.arange(1e-4, 5e-3, 1e-4)):
+            """
+            Computes the phase coherence from the 2D PSD and phase coherence DataArrays.
+
+            Params:
+            psd_da : xr.DataArray
+                2D Power Spectral Density DataArray with dimensions ('freq_y', 'freq_x').
+
+            phase_coherence_da : xr.DataArray
+                2D Phase Coherence DataArray with dimensions ('freq_y', 'freq_x').
+
+            Returns:
+            phase_coherence_max : float
+                Maximum phase coherence values for each frequency bin.
+            """
+            f = np.sqrt(self.psd['freq_x']**2 + self.psd['freq_y']**2)
+            phase_coherence_values = self.phase_coherence.values
+            psd_values = self.psd.values
+    
+            # Bin the PSD values based on the radial frequency
+            phase_coherence_max = np.zeros_like(f_bins[:-1])
+            for i, (f_min, f_max) in enumerate(zip(f_bins[:-1], f_bins[1:])):
+                mask = (f >= f_min) & (f < f_max)
+                psd_bin = psd_values[mask]
+                phase_coherence_bin = phase_coherence_values[mask]
+                psd_max_idx = np.argmax(psd_bin)
+                if len(psd_bin) > 0 and len(phase_coherence_bin) > 0:
+                    phase_coherence_max[i] = phase_coherence_bin[psd_max_idx]
+                else:
+                    phase_coherence_max[i] = np.nan  # Handle empty bins
+    
+            return phase_coherence_max
 
     def compute_wavelet_2D(self,var_name='Sigma0_VV_no_targets',spatial_dims=('y', 'x'),n_octaves=6,scales_per_octave=2,n_angles=18,output_stride=16,sigma=6.0,k0=np.pi,detrend=True):
         """
