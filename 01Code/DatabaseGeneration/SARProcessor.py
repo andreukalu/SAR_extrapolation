@@ -634,7 +634,9 @@ class SARProcessor:
                 
                 # 2D FFT & Power calculation
                 fft2_tile = np.fft.fft2(tile_windowed)
-                phi2_tile = np.angle(fft2_tile) - 2*np.pi*(np.fft.fftfreq(ty)[:, None] * y + np.fft.fftfreq(tx)[None, :] * x)
+                yc = y + ty / 2
+                xc = x + tx / 2
+                phi2_tile = np.angle(fft2_tile) - 2*np.pi*(np.fft.fftfreq(ty)[:, None] * yc + np.fft.fftfreq(tx)[None, :] * xc)
                 power_tile = (np.abs(fft2_tile)**2) / win_norm
                 
                 psd_accumulator += power_tile
@@ -646,7 +648,7 @@ class SARProcessor:
 
         # 6. Average across tiles and shift zero-frequency (DC) component to center
         psd_avg = psd_accumulator / tile_count
-        phase_coherence = np.abs(phi2_accumulator / tile_count) ** 2
+        phase_coherence = np.abs(phi2_accumulator / tile_count)
         psd_shifted = np.fft.fftshift(psd_avg)
         phase_coherence_shifted = np.fft.fftshift(phase_coherence)
 
@@ -754,6 +756,7 @@ class SARProcessor:
             psd_bin = 10 ** (psd_bin / 10)  # Convert from dB to linear scale
             if len(psd_bin) > 0:
                 anisotropy[i] = (np.max(psd_bin) - np.min(psd_bin)) / (np.max(psd_bin) + np.min(psd_bin))
+                anisotropy[i] = (np.max(psd_bin)) / (np.median(psd_bin))
 
         return anisotropy
 
