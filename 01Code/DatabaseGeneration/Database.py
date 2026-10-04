@@ -7,28 +7,29 @@ import glob
 import datetime
 import re
 import numpy as np
+from .configManager import Config
 
 class Database:
 
-    def __init__(self,db_path,sar_src_path='',fino_src_path='',images_path=''):
+    def __init__(self, config: Config):
 
         # Add paths to processed SAR files and FINO1
-        self.sar_src_path = sar_src_path
-        self.fino_src_path = fino_src_path
+        self.sar_src_path = config.sar_src_path
+        self.fino_src_path = config.fino_src_path
         
         # Add path to the database file
-        self.db_path = db_path
+        self.db_path = config.db_path
 
         # Create DB directory
-        dirname, fname = os.path.split(db_path)
+        dirname, fname = os.path.split(config.db_path)
         if not os.path.isdir(dirname):
             os.makedirs(dirname)
 
         # Add path to the images folder
-        self.images_path = images_path
+        self.images_path = config.images_path
         
         # Create images directory
-        dirname, fname = os.path.split(images_path)
+        dirname, fname = os.path.split(config.images_path)
         if not os.path.isdir(dirname):
             os.makedirs(dirname)
 

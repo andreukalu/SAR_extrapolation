@@ -9,7 +9,7 @@ from scipy.ndimage import uniform_filter, maximum_filter
 import glob
 import pickle
 import numpy as np
-
+from .configManager import Config
 # SAR file processor class
 """
     This class extracts useful information from pre-processed L-1 SLC Sentinel-1 AB data.
@@ -35,7 +35,8 @@ import numpy as np
 """
 class SARProcessor:
 
-    def __init__(self,sar_src_path,sar_dst_path='',sar_file_name='',lat=0,lon=0,width=3500,height=3500):
+    def __init__(self, config: Config):
+        # sar_src_path,sar_dst_path='',sar_file_name='',lat=0,lon=0,width=3500,height=3500
         """
         Class constructor.
 
@@ -57,10 +58,8 @@ class SARProcessor:
         """
 
         # Save paths as attributes
-        self.src_path = sar_src_path
-        self.sar_dst_path = sar_dst_path
-        self.file_name = sar_file_name
-        self.file_path = os.path.join(sar_src_path,sar_file_name)
+        self.src_path = config.sar_src_path #sar_src_path
+        self.sar_dst_path = config.sar_dst_path #sar_dst_path
 
         # Create SAR dst directory
         dirname, fname = os.path.split(self.sar_dst_path)
@@ -68,12 +67,12 @@ class SARProcessor:
             os.makedirs(dirname)
 
         # Add target coordinates
-        self.lat = lat
-        self.lon = lon
+        self.lat = config.lat
+        self.lon = config.lon
 
         # Add the width and height of the analysis window
-        self.width = width
-        self.height = height
+        self.width = config.width
+        self.height = config.height
 
     ############## METHODS ############
     def process_sar_files(self):
@@ -127,29 +126,30 @@ class SARProcessor:
     
             # Process each .nc SAR measurement file
             print(f'Processing file {file}')
-            try:
-                # Read the .nc file
-                self.read_file(file)
+            # try:
+            # Read the .nc file
+            self.read_file(file)
 
-                # Cut the target tile to be processed
-                self.obtain_target_tile()
+            # Cut the target tile to be processed
+            self.obtain_target_tile()
 
-                # Filter out objects in the tile such as ships or wind turbines
-                self.filter_objects(num_guard=20, num_ref=20, pfa=1e-3)
+            # Filter out objects in the tile such as ships or wind turbines
+            self.filter_objects(num_guard=20, num_ref=20, pfa=1e-3)
 
-                # Compute the 2D PSDs of the tile using the Welch method and periodogram method
-                # self.compute_welch_2D(tile_size=(128, 128), overlap=0.5, window='hamming', return_db=True)
-                self.compute_fft_2D()
+            # Compute the 2D PSDs of the tile using the Welch method and periodogram method
+            # self.compute_welch_2D(tile_size=(128, 128), overlap=0.5, window='hamming', return_db=True)
+            self.compute_fft_2D()
 
-                self.compute_autocorr_2D()
+            self.compute_autocorr_2D()
 
-                # Delete the dataset containing the whole SAR image and only retain the cutted tile
-                del self.ds
+            # Delete the dataset containing the whole SAR image and only retain the cutted tile
+            del self.ds
 
-                # Save the processed tile
-                self.write_product(os.path.basename(file).split('.')[0])
-            except:
-                print(f'Couldnt process file {file}')
+            # Save the processed tile
+            self.write_product(os.path.basename(file).split('.')[0])
+            return self.tile
+            # except:
+            #     print(f'Couldnt process file {file}')
 
     def print_info(self):
             """
@@ -202,10 +202,11 @@ class SARProcessor:
         """
 
         # Check if the input file_path is to be used, or the on in the class attributes
-        if file_path == '':
-            self.ds = xr.open_dataset(self.file_path)
+        if os.path.exists(file_path):
+            self.ds = xr.open_dataset(file_path)
         else:
-            self.ds = xr.open_dataset(os.path.join(self.src_path,file_path))
+            print("File path doesn't exist")
+            return
 
         # Add icident angle and platform heading for easy access
         self.ds['incident_angle'] = self.ds['incident_angle']
@@ -775,121 +776,257 @@ class SARProcessor:
 
     # def retrieve_stability_from_psd(self):
 
-    # def wind_retrieval(self):
+    def wind_retrieval(self, tile, var_name='Sigma0_VV_no_targets', v_bounds=(0.5, 40.0),
+                   n_phi_starts=12, n_v_starts=3, work_in_log=True):
+        """
+        Retrieve wind speed and direction from SAR σ0 using CMOD5_N and least squares.
+        Assumes uniform wind over the tile (all pixels share v and phi_w, each with its own theta).
+
+        Params:
+        var_name : str
+            Name of the linear-scale σ0 variable in the tile (e.g. 'Sigma0_VV_no_targets').
+        v_bounds : tuple
+            (min, max) wind speed bounds [m/s] for the optimizer.
+        n_phi_starts : int
+            Number of initial azimuth guesses (grid over [0, 360)).
+        n_v_starts : int
+            Number of initial speed guesses per azimuth.
+        work_in_log : bool
+            If True, minimize residuals in log-space (recommended).
+
+        Returns:
+        v_ret : float
+            Retrieved wind speed [m/s].
+        phi_ret : float
+            Retrieved absolute wind direction [deg], in [0, 360).
+        """
+        from scipy.optimize import least_squares
+        from scipy.ndimage import zoom
+        # ------------------------------------------------------------------
+        # 1. Gather σ0, incidence angle and platform heading
+        # ------------------------------------------------------------------
+        sigma0_arr = np.asarray(tile[var_name].values, dtype=np.float64)
+        ny, nx = sigma0_arr.shape
+        sigma0_arr = sigma0_arr.ravel()
+
+        theta_arr = np.asarray(tile['incident_angle'].values, dtype=np.float64)
+        if theta_arr.ndim == 2 and theta_arr.shape != (ny, nx):
+            # Interpolar tiepoint grid (tp_y, tp_x) → (ny, nx)
+            fy = ny / theta_arr.shape[0]
+            fx = nx / theta_arr.shape[1]
+            theta_arr = zoom(theta_arr, (fy, fx), order=1)   # bilineal
+            # Recortar por seguridad si zoom devuelve un píxel de más por redondeo
+            theta_arr = theta_arr[:ny, :nx]
+        theta_arr = theta_arr.ravel()
+
+        # Platform heading (scalar per product)
+        heading_arr = np.asarray(tile['platform_heading'].values).ravel()
+        platform_heading = float(heading_arr[0]) if heading_arr.size else np.nan
+
+        # ------------------------------------------------------------------
+        # 2. Mask invalid pixels
+        # ------------------------------------------------------------------
+        valid = (np.isfinite(sigma0_arr) & np.isfinite(theta_arr)
+                & (sigma0_arr > 0.0) & (theta_arr > 0.0))
+
+        sigma0_v = sigma0_arr[valid]
+        theta_v  = theta_arr[valid]
+
+        if sigma0_v.size < 10 or not np.isfinite(platform_heading):
+            print("wind_retrieval: not enough valid pixels or missing platform heading.")
+            self.retrieved_wind_speed = np.nan
+            self.retrieved_wind_direction = np.nan
+            return np.nan, np.nan
+
+        # ------------------------------------------------------------------
+        # 3. Antenna look azimuth (Sentinel-1 right-looking => heading + 90°)
+        # ------------------------------------------------------------------
+        look_azimuth = (platform_heading + 90.0) % 360.0
+
+        # Pre-compute observed log-σ0 for residuals
+        log_sigma0_obs = np.log(sigma0_v)
+
+        # ------------------------------------------------------------------
+        # 4. Residual function: params = [v, phi_wind_absolute]
+        # ------------------------------------------------------------------
+        def residuals(params):
+            v, phi_wind = params
+
+            # Relative angle wind-to-look, wrapped to [-180, 180]
+            phi_rel = (phi_wind - look_azimuth + 180.0) % 360.0 - 180.0
+
+            # CMOD5_N is symmetric in ±phi: use absolute value
+            sigma0_pred = self.calc_sigma0_cmod5_n(v, np.abs(phi_rel), theta_v)
+
+            # Guard against invalid predictions
+            sigma0_pred = np.where(np.isfinite(sigma0_pred) & (sigma0_pred > 0),
+                                sigma0_pred, 1e-12)
+
+            if work_in_log:
+                return np.log(sigma0_pred) - log_sigma0_obs
+            else:
+                return sigma0_pred - sigma0_v
+
+        # ------------------------------------------------------------------
+        # 5. Multi-start least squares (handles 180° ambiguity + local minima)
+        # ------------------------------------------------------------------
+        phi_grid = np.linspace(0.0, 360.0, n_phi_starts, endpoint=False)
+        v_grid   = np.linspace(v_bounds[0] + 0.5, v_bounds[1] - 0.5, n_v_starts)
+
+        best_result = None
+        best_cost   = np.inf
+
+        for phi0 in phi_grid:
+            for v0 in v_grid:
+                try:
+                    res = least_squares(
+                        residuals,
+                        x0=[v0, phi0],
+                        bounds=([v_bounds[0], 0.0], [v_bounds[1], 360.0]),
+                        method='trf',
+                        max_nfev=200,
+                    )
+                    if res.cost < best_cost:
+                        best_cost   = res.cost
+                        best_result = res
+                except Exception:
+                    continue
+
+        if best_result is None:
+            print("wind_retrieval: all least-squares attempts failed.")
+            self.retrieved_wind_speed = np.nan
+            self.retrieved_wind_direction = np.nan
+            return np.nan, np.nan
+
+        v_ret, phi_ret = best_result.x
+        phi_ret = phi_ret % 360.0  # → [0, 360)
+
+        # ------------------------------------------------------------------
+        # 6. Store results on object and tile
+        # ------------------------------------------------------------------
+        self.retrieved_wind_speed     = float(v_ret)
+        self.retrieved_wind_direction = float(phi_ret)
+
+        tile['retrieved_wind_speed']     = float(v_ret)
+        tile['retrieved_wind_direction'] = float(phi_ret)
+        tile['wind_retrieval_cost']      = float(best_cost)
+        tile['wind_retrieval_n_pixels']  = int(sigma0_v.size)
+
+        return v_ret, phi_ret, tile
 
     ########### HELP: functions that can be used ################
-    # def calc_sigma0_cmod5_n(self, v, phi, theta):
-    #     """Calculates CMOD5n normalized radar backscatter (linear).
+    def calc_sigma0_cmod5_n(self, v, phi, theta):
+        """Calculates CMOD5n normalized radar backscatter (linear).
 
-    #     Parameters:
-    #         v: Wind speed [m/s] (>= 0)
-    #         phi: Relative wind direction [deg] (angle between azimuth and wind
-    #         direction)
-    #         theta: Incidence angle [deg]
+        Parameters:
+            v: Wind speed [m/s] (>= 0)
+            phi: Relative wind direction [deg] (angle between azimuth and wind
+            direction)
+            theta: Incidence angle [deg]
 
-    #     Returns:
-    #         CMOD5_N: Normalized backscatter sigma0 (linear scale)
-    #     """
+        Returns:
+            CMOD5_N: Normalized backscatter sigma0 (linear scale)
+        """
 
-    #     # 1-based indexing added to match Fortran C(1) .. C(28)
-    #     C = np.array(
-    #         [
-    #             0.0,  # Index 0 unused to maintain 1-based Fortran indexing
-    #             -0.6878,
-    #             -0.7957,
-    #             0.3380,
-    #             -0.1728,
-    #             0.0000,
-    #             0.0040,
-    #             0.1103,
-    #             0.0159,
-    #             6.7329,
-    #             2.7713,
-    #             -2.2885,
-    #             0.4971,
-    #             -0.7250,
-    #             0.0450,
-    #             0.0066,
-    #             0.3222,
-    #             0.0120,
-    #             22.7000,
-    #             2.0813,
-    #             3.0000,
-    #             8.3659,
-    #             -3.3428,
-    #             1.3236,
-    #             6.2437,
-    #             2.3893,
-    #             0.3249,
-    #             4.1590,
-    #             1.6930,
-    #         ]
-    #     )
+        # 1-based indexing added to match Fortran C(1) .. C(28)
+        C = np.array(
+            [
+                0.0,  # Index 0 unused to maintain 1-based Fortran indexing
+                -0.6878,
+                -0.7957,
+                0.3380,
+                -0.1728,
+                0.0000,
+                0.0040,
+                0.1103,
+                0.0159,
+                6.7329,
+                2.7713,
+                -2.2885,
+                0.4971,
+                -0.7250,
+                0.0450,
+                0.0066,
+                0.3222,
+                0.0120,
+                22.7000,
+                2.0813,
+                3.0000,
+                8.3659,
+                -3.3428,
+                1.3236,
+                6.2437,
+                2.3893,
+                0.3249,
+                4.1590,
+                1.6930,
+            ]
+        )
 
-    #     DTOR = 57.29577951
-    #     THETM = 40.0
-    #     THETHR = 25.0
-    #     ZPOW = 1.6
+        DTOR = 57.29577951
+        THETM = 40.0
+        THETHR = 25.0
+        ZPOW = 1.6
 
-    #     Y0 = C[19]
-    #     PN = C[20]
-    #     A = C[19] - (C[19] - 1.0) / C[20]
-    #     B = 1.0 / (C[20] * (C[19] - 1.0) ** (3 - 1))
+        Y0 = C[19]
+        PN = C[20]
+        A = C[19] - (C[19] - 1.0) / C[20]
+        B = 1.0 / (C[20] * (C[19] - 1.0) ** (3 - 1))
 
-    #     # Angles
-    #     FI = np.radians(phi)  # equivalent to phi / DTOR
-    #     CSFI = np.cos(FI)
-    #     CS2FI = 2.0 * CSFI * CSFI - 1.0
+        # Angles
+        FI = np.radians(phi)  # equivalent to phi / DTOR
+        CSFI = np.cos(FI)
+        CS2FI = 2.0 * CSFI * CSFI - 1.0
 
-    #     X = (theta - THETM) / THETHR
-    #     XX = X * X
+        X = (theta - THETM) / THETHR
+        XX = X * X
 
-    #     # B0: Function of wind speed and incidence angle
-    #     A0 = C[1] + C[2] * X + C[3] * XX + C[4] * X * XX
-    #     A1 = C[5] + C[6] * X
-    #     A2 = C[7] + C[8] * X
+        # B0: Function of wind speed and incidence angle
+        A0 = C[1] + C[2] * X + C[3] * XX + C[4] * X * XX
+        A1 = C[5] + C[6] * X
+        A2 = C[7] + C[8] * X
 
-    #     GAM = C[9] + C[10] * X + C[11] * XX
-    #     S0 = C[12] + C[13] * X
+        GAM = C[9] + C[10] * X + C[11] * XX
+        S0 = C[12] + C[13] * X
 
-    #     S = A2 * v
-    #     A3 = 1.0 / (1.0 + np.exp(-np.maximum(S, S0)))
+        S = A2 * v
+        A3 = 1.0 / (1.0 + np.exp(-np.maximum(S, S0)))
 
-    #     # Piecewise condition for S < S0
-    #     if np.ndim(S) > 0:
-    #         mask = S < S0
-    #         A3[mask] = A3[mask] * (S[mask] / S0[mask]) ** (
-    #             S0[mask] * (1.0 - A3[mask])
-    #         )
-    #     else:
-    #         if S < S0:
-    #             A3 = A3 * (S / S0) ** (S0 * (1.0 - A3))
+        # Piecewise condition for S < S0
+        if np.ndim(S) > 0:
+            mask = S < S0
+            A3[mask] = A3[mask] * (S[mask] / S0[mask]) ** (
+                S0[mask] * (1.0 - A3[mask])
+            )
+        else:
+            if S < S0:
+                A3 = A3 * (S / S0) ** (S0 * (1.0 - A3))
 
-    #     B0 = (A3**GAM) * (10.0 ** (A0 + A1 * v))
+        B0 = (A3**GAM) * (10.0 ** (A0 + A1 * v))
 
-    #     # B1: Function of wind speed and incidence angle
-    #     B1 = C[15] * v * (0.5 + X - np.tanh(4.0 * (X + C[16] + C[17] * v)))
-    #     B1 = C[14] * (1.0 + X) - B1
-    #     B1 = B1 / (np.exp(0.34 * (v - C[18])) + 1.0)
+        # B1: Function of wind speed and incidence angle
+        B1 = C[15] * v * (0.5 + X - np.tanh(4.0 * (X + C[16] + C[17] * v)))
+        B1 = C[14] * (1.0 + X) - B1
+        B1 = B1 / (np.exp(0.34 * (v - C[18])) + 1.0)
 
-    #     # B2: Function of wind speed and incidence angle
-    #     V0 = C[21] + C[22] * X + C[23] * XX
-    #     D1 = C[24] + C[25] * X + C[26] * XX
-    #     D2 = C[27] + C[28] * X
+        # B2: Function of wind speed and incidence angle
+        V0 = C[21] + C[22] * X + C[23] * XX
+        D1 = C[24] + C[25] * X + C[26] * XX
+        D2 = C[27] + C[28] * X
 
-    #     V2 = (v / V0) + 1.0
+        V2 = (v / V0) + 1.0
 
-    #     # Piecewise condition for V2 < Y0
-    #     if np.ndim(V2) > 0:
-    #         mask2 = V2 < Y0
-    #         V2[mask2] = A + B * (V2[mask2] - 1.0) ** PN
-    #     else:
-    #         if V2 < Y0:
-    #             V2 = A + B * (V2 - 1.0) ** PN
+        # Piecewise condition for V2 < Y0
+        if np.ndim(V2) > 0:
+            mask2 = V2 < Y0
+            V2[mask2] = A + B * (V2[mask2] - 1.0) ** PN
+        else:
+            if V2 < Y0:
+                V2 = A + B * (V2 - 1.0) ** PN
 
-    #     B2 = (-D1 + D2 * V2) * np.exp(-V2)
+        B2 = (-D1 + D2 * V2) * np.exp(-V2)
 
-    #     # CMOD5_N: Combine the three Fourier terms
-    #     CMOD5_N = B0 * (1.0 + B1 * CSFI + B2 * CS2FI) ** ZPOW
+        # CMOD5_N: Combine the three Fourier terms
+        CMOD5_N = B0 * (1.0 + B1 * CSFI + B2 * CS2FI) ** ZPOW
 
-    #     return CMOD5_N
+        return CMOD5_N
