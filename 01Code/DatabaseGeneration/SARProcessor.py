@@ -202,8 +202,12 @@ class SARProcessor:
             self.tile['psd'] = self.psd
             self.tile['phase_coherence'] = self.phase_coherence
             self.tile['max_component'] = self.max_component
+            self.tile['max_component_coherence'] = self.max_component_coherence
             self.tile['anisotropy'] = self.anisotropy
             self.tile['phase_coherence_max'] = self.phase_coherence_max
+            self.tile['max_phase_coherence'] = self.max_phase_coherence
+            self.tile['min_phase_coherence'] = self.min_phase_coherence
+            self.tile['mean_phase_coherence'] = self.mean_phase_coherence
             self.tile['f_bins'] = self.f_bins
         
         # Add autocorr to the tile
@@ -687,9 +691,9 @@ class SARProcessor:
         self.phase_coherence = phase_coherence_da
         self.psd = psd_da
 
-        max_component = self.compute_max_psd_component_f(f_bins)
+        max_component, max_component_coherence = self.compute_max_psd_component_f(f_bins)
         anisotropy = self.compute_anisotropy_f(f_bins)
-        phase_coherence_max = self.compute_phase_coherence_f(f_bins)
+        phase_coherence_max, max_phase_coherence, min_phase_coherence, mean_phase_coherence = self.compute_phase_coherence_f(f_bins)
 
         # Preserve metadata attributes
         psd_da.attrs['units'] = unit_label
@@ -702,8 +706,12 @@ class SARProcessor:
         self.psd = psd_da
         self.phase_coherence = phase_coherence_da
         self.max_component = max_component
+        self.max_component_coherence = max_component_coherence
         self.anisotropy = anisotropy
         self.phase_coherence_max = phase_coherence_max
+        self.max_phase_coherence = max_phase_coherence
+        self.min_phase_coherence = min_phase_coherence
+        self.mean_phase_coherence = mean_phase_coherence
         self.f_bins = f_bins
         
         return psd_da
@@ -722,16 +730,20 @@ class SARProcessor:
             """
             f = np.sqrt(self.psd['freq_x']**2 + self.psd['freq_y']**2)
             psd_values = self.psd.values
+            phase_coherence_values = self.phase_coherence.values
     
             # Bin the PSD values based on the radial frequency
             max_component = np.zeros_like(f_bins[:-1])
+            max_component_coherence = np.zeros_like(f_bins[:-1])
             for i, (f_min, f_max) in enumerate(zip(f_bins[:-1], f_bins[1:])):
                 mask = (f >= f_min) & (f < f_max)
                 psd_bin = psd_values[mask]
+                phase_coherence_bin = phase_coherence_values[mask]
                 if len(psd_bin) > 0:
                     max_component[i] = np.max(psd_bin)
+                    max_component_coherence[i] = psd_bin[np.argmax(phase_coherence_bin)]
     
-            return max_component
+            return max_component, max_component_coherence
     
     def compute_anisotropy_f(self, f_bins=np.arange(1e-4, 5e-3, 1e-4)):
         """
@@ -757,6 +769,7 @@ class SARProcessor:
             if len(psd_bin) > 0:
                 anisotropy[i] = (np.max(psd_bin) - np.min(psd_bin)) / (np.max(psd_bin) + np.min(psd_bin))
                 anisotropy[i] = (np.max(psd_bin)) / (np.median(psd_bin))
+                anisotropy[i] = (np.std(psd_bin)) / (np.mean(psd_bin))
 
         return anisotropy
 
@@ -781,6 +794,9 @@ class SARProcessor:
     
             # Bin the PSD values based on the radial frequency
             phase_coherence_max = np.zeros_like(f_bins[:-1])
+            max_phase_coherence = np.zeros_like(f_bins[:-1])
+            min_phase_coherence = np.zeros_like(f_bins[:-1])
+            mean_phase_coherence = np.zeros_like(f_bins[:-1])
             for i, (f_min, f_max) in enumerate(zip(f_bins[:-1], f_bins[1:])):
                 mask = (f >= f_min) & (f < f_max)
                 psd_bin = psd_values[mask]
@@ -788,10 +804,16 @@ class SARProcessor:
                 psd_max_idx = np.argmax(psd_bin)
                 if len(psd_bin) > 0 and len(phase_coherence_bin) > 0:
                     phase_coherence_max[i] = phase_coherence_bin[psd_max_idx]
+                    max_phase_coherence[i] = np.max(phase_coherence_bin)  # Store the maximum phase coherence in the bin
+                    min_phase_coherence[i] = np.min(phase_coherence_bin)  # Store the minimum phase coherence in the bin
+                    mean_phase_coherence[i] = np.mean(phase_coherence_bin)  # Store the mean phase coherence in the bin
                 else:
                     phase_coherence_max[i] = np.nan  # Handle empty bins
-    
-            return phase_coherence_max
+                    max_phase_coherence[i] = np.nan  # Handle empty bins
+                    min_phase_coherence[i] = np.nan  # Handle empty bins
+                    mean_phase_coherence[i] = np.nan  # Handle empty bins
+
+            return phase_coherence_max, max_phase_coherence, min_phase_coherence, mean_phase_coherence
 
     def compute_wavelet_2D(self,var_name='Sigma0_VV_no_targets',spatial_dims=('y', 'x'),n_octaves=6,scales_per_octave=2,n_angles=18,output_stride=16,sigma=6.0,k0=np.pi,detrend=True):
         """

@@ -7,6 +7,7 @@ import glob
 import datetime
 import re
 import numpy as np
+import traceback
 
 class Database:
 
@@ -152,7 +153,159 @@ class Database:
                 print('Some printing failed')
             print(f'Image saved at {self.images_path}')
 
-    def generate_db_images_for_single_product(self,product_index,images_path=''):
+    def generate_db_images_spectral_analysis(self,product_index,images_path=''):
+        
+        if images_path != '':
+            self.images_path = images_path
+        else:
+            images_path=self.images_path
+        
+        print(f'Generating image {product_index}')
+        try:
+            self.load_sar_product(product_index)
+            
+            fname = self.sar_product.split('.')[0]
+
+            psd = self.tile.psd.values
+            ncrs = self.tile['Sigma0_VV_no_targets'].values
+            lat = self.tile.lat.values
+            lon = self.tile.lon.values
+            f_x = self.tile.freq_x.values
+            f_y = self.tile.freq_y.values
+            phase_coherence = self.tile.phase_coherence.values
+            max_component = self.tile.max_component.values
+            max_component_coherence = self.tile.max_component_coherence.values
+            anisotropy = self.tile.anisotropy.values
+            phase_coherence_max = self.tile.phase_coherence_max.values
+            max_phase_coherence = self.tile.max_phase_coherence.values
+            min_phase_coherence = self.tile.min_phase_coherence.values
+            mean_phase_coherence = self.tile.mean_phase_coherence.values
+            f_bins = self.tile.f_bins.values
+            # Convert PSD from dB to linear
+            psd = 10.0 ** (psd / 10.0)
+
+            # Drop the last frequency bin (MATLAB 1-indexed: f_bins(1:end-1))
+            f_bins = f_bins[:-1]
+
+            # Build masks for |f| < 5e-2
+            idx_x = np.abs(f_x) < 5e-2
+            idx_y = np.abs(f_y) < 5e-2
+
+            # Subset (numpy uses [row, col] = [y, x])
+            psd = psd[np.ix_(idx_y, idx_x)]
+            phase_coherence = phase_coherence[np.ix_(idx_y, idx_x)]
+            f_x_sub = f_x[idx_x]
+            f_y_sub = f_y[idx_y]
+
+            # --- Build figure (30 x 20 cm) ---
+            cm_to_in = 1 / 2.54
+            fig = plt.figure(figsize=(30 * cm_to_in, 20 * cm_to_in), constrained_layout=True)
+
+            # --- Subplot 1: PSD ---
+            ax1 = fig.add_subplot(2, 3, 1)
+            ax1.ticklabel_format(axis='both', style='sci', scilimits=(-3, -3), useMathText=True)
+            psd_db = 10 * np.log10(psd)
+            # pcolormesh expects edges; use centers and shading='auto'
+            mesh1 = ax1.pcolormesh(f_x_sub, f_y_sub, psd_db, shading='auto')
+            ax1.set_xlabel('f_y [1/m]')
+            ax1.set_ylabel('f_x [1/m]')
+            ax1.set_xlim([-1e-3, 1e-3])
+            ax1.set_ylim([-1e-3, 1e-3])
+            ax1.set_title(fname, fontsize=8)
+            fig.colorbar(mesh1, ax=ax1)
+
+            # --- Subplot 2: Phase coherence ---
+            ax2 = fig.add_subplot(2, 3, 2)
+            ax2.ticklabel_format(axis='both', style='sci', scilimits=(-3, -3), useMathText=True)
+            pc_db = 10 * np.log10(phase_coherence)
+            mesh2 = ax2.pcolormesh(f_x_sub, f_y_sub, pc_db, shading='auto',
+                                vmin=-10, vmax=0)
+            ax2.set_xlabel('f_y [1/m]')
+            ax2.set_ylabel('f_x [1/m]')
+            ax2.set_xlim([-1e-3, 1e-3])
+            ax2.set_ylim([-1e-3, 1e-3])
+            fig.colorbar(mesh2, ax=ax2)
+
+            # --- Subplot 3: Max component vs wavelength ---
+            ax3 = fig.add_subplot(2, 3, 3)
+            wavelength = 1.0 / f_bins
+            ax3.plot(wavelength, max_component)
+            ax3.plot(wavelength, max_component_coherence, label='Max Component Coherence', linestyle='--', color='r')
+            ax3.set_xlabel('wavelength')
+            ax3.set_ylabel('PSD max component [dB normalized]')
+            ax3.set_ylim([-20, 0])
+            ax3.grid(True, which='both', axis='both', alpha=0.4, linestyle='--', linewidth=0.5)
+
+            ax3 = fig.add_subplot(2, 3, 4)
+            # Render spatial tile using longitude/latitude coordinates
+            mesh3 = ax3.pcolormesh(lon, lat, ncrs, shading='auto', vmin=0, vmax=0.1)
+            ax3.set_xlabel('Lon [deg]')
+            ax3.set_ylabel('Lat [deg]')
+            fig.colorbar(mesh3, ax=ax3)
+    
+            # Overlay Bulk Richardson Number (bRi) if available in tile metadata
+            ax3.text(
+                0.05,
+                0.92,
+                f"bRi: {self.sar_product_meteo['Ri']:.3f}",
+                transform=ax3.transAxes,
+                color="white",
+                bbox=dict(facecolor="black", alpha=0.6),
+            )
+    
+            # Overlay Wind Shear Exponent (alpha) if available (r"" used for LaTeX \alpha)
+            ax3.text(0.05,
+                0.82,
+                rf"$\alpha$: {self.sar_product_meteo['wind_shear_exponent']:.3f}",
+                transform=ax3.transAxes,
+                color="white",
+                bbox=dict(facecolor="black", alpha=0.6),
+            )
+    
+            # Overlay Obukhov Length (L) if available in tile metadata
+            ax3.text(
+                0.05,
+                0.72,
+                f"L: {self.sar_product_meteo['L']:.3f}",
+                transform=ax3.transAxes,
+                color="white",
+                bbox=dict(facecolor="black", alpha=0.6),
+            )
+
+            # --- Subplot 5: Phase coherence max vs wavelength ---
+            ax5 = fig.add_subplot(2, 3, 5)
+            ax5.plot(wavelength, phase_coherence_max, color='k')
+            ax5.plot(wavelength, max_phase_coherence, label='Max Phase Coherence', linestyle='--', color='r')
+            ax5.plot(wavelength, min_phase_coherence, label='Min Phase Coherence', linestyle='--', color='r')
+            ax5.plot(wavelength, mean_phase_coherence, label='Mean Phase Coherence', linestyle='-.', color=[0.5, 0.5, 0.5])
+            ax5.set_xlabel('wavelength')
+            ax5.set_ylabel('Gamma')
+            ax5.set_ylim([0, 1])
+            # Dashed reference line at 0.1
+            ax5.axhline(y=0.1, linestyle='--', color='k')
+            ax5.grid(True, which='both', axis='both', alpha=0.4, linestyle='--', linewidth=0.5)
+
+            # --- Subplot 6: Anisotropy vs wavelength ---
+            ax6 = fig.add_subplot(2, 3, 6)
+            ax6.plot(wavelength, anisotropy)
+            ax6.set_xlabel('Wavelength')
+            ax6.set_ylabel('Anisotropy')
+            ax6.grid(True, which='both', axis='both', alpha=0.4, linestyle='--', linewidth=0.5)
+            ax6.set_ylim([0, 3])
+
+            # --- Save ---
+            base = fname[:-3] if fname.endswith('.nc') else fname
+            out_path = os.path.join(images_path, f'{base}_analysis.png')
+            fig.savefig(out_path, dpi=300, bbox_inches='tight')
+            plt.close(fig)
+            print(f'Image saved at {out_path}')
+
+        except Exception as e:
+            print(f'Could not process file')
+            print(f'Error: {type(e).__name__}: {e}')
+            traceback.print_exc()
+
+    def generate_db_images_for_single_product(self,product_index,images_path='',scene=True,fft=True,AC=True):
             """
             Generates images for the whole database with scene images and FFT images
     
@@ -167,11 +320,16 @@ class Database:
             print(f'Generating image {product_index}')
             try:
                 self.load_sar_product(product_index)
-                self.plot_scene(save_image=True,images_path=self.images_path)
-                self.plot_fft(save_image=True,images_path=self.images_path)
-                self.plot_fft(zoom=True,save_image=True,images_path=self.images_path)
-                self.plot_autocorr(save_image=True,images_path=self.images_path)
-                self.plot_autocorr(zoom=True,save_image=True,images_path=self.images_path)
+                if scene == True:
+                    self.plot_scene(save_image=True,images_path=self.images_path)
+
+                if fft == True:
+                    self.plot_fft(save_image=True,images_path=self.images_path)
+                    self.plot_fft(zoom=True,save_image=True,images_path=self.images_path)
+
+                if AC == True:
+                    self.plot_autocorr(save_image=True,images_path=self.images_path)
+                    self.plot_autocorr(zoom=True,save_image=True,images_path=self.images_path)
             except:
                 print('Some printing failed')
             print(f'Image saved at {self.images_path}')
