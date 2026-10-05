@@ -115,7 +115,7 @@ class AtmosphericProcessor:
 
         # Select columns corresponding to the variable name and altitudes
         if var_name == 'WSPD':
-            selected_columns = [col for col in columns if col.startswith(var_name) and "MC" not in col and self.anemometer_type in col and "MAX" not in col and "MIN" not in col and "VAR" not in col]
+            selected_columns = [col for col in columns if col.startswith(var_name) and "MC" in col and self.anemometer_type in col and "MAX" not in col and "MIN" not in col and "VAR" not in col]
         else:
             selected_columns = [col for col in columns if col.startswith(var_name) and "MAX" not in col and "MIN" not in col and "MC" not in col and "VAR" not in col]
 
@@ -235,7 +235,7 @@ class AtmosphericProcessor:
         print(f"Computing wind shear exponent between {self.z1}m and {self.z2}m...")
 
         # Extract all columns corresponding to wind speed at different altitudes
-        wind_speed_columns = [col for col in self.internal_df.columns if col.startswith('WSPD') and "MC" not in col and self.anemometer_type in col and "MAX" not in col and "MIN" not in col and "VAR" not in col and "z1" not in col and "z2" not in col]
+        wind_speed_columns = [col for col in self.internal_df.columns if col.startswith('WSPD') and "MC" in col and self.anemometer_type in col and "MAX" not in col and "MIN" not in col and "VAR" not in col and "z1" not in col and "z2" not in col]
         print(wind_speed_columns)
         altitudes = [int(col.split('_')[-1][:-1]) for col in wind_speed_columns]  # Extract altitudes from column names
         wind_speeds = self.internal_df[wind_speed_columns].values  # Extract wind speed values 
