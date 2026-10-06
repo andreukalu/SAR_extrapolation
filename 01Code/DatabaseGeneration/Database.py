@@ -11,10 +11,11 @@ import traceback
 
 class Database:
 
-    def __init__(self,db_path,sar_src_path='',fino_src_path='',images_path=''):
+    def __init__(self,db_path,sar_src_path='',sar_statistics_path='',fino_src_path='',images_path=''):
 
         # Add paths to processed SAR files and FINO1
         self.sar_src_path = sar_src_path
+        self.sar_statistics_path = sar_statistics_path
         self.fino_src_path = fino_src_path
         
         # Add path to the database file
@@ -39,7 +40,7 @@ class Database:
     def load_db(self):
         self.db = pd.read_pickle(self.db_path)
 
-    def merge_datasets(self):
+    def merge_datasets(self,statistics=True):
         
         # Load FINO1 dataset
         self.fino1_df = pd.read_pickle(self.fino_src_path)
@@ -62,6 +63,26 @@ class Database:
             # Extract the filename and add it to the dataframe
             filename = os.path.basename(file)
             row['filename'] = filename
+
+            if statistics == True:
+                try:
+                    # Load the SAR statistics file
+                    stats_file = os.path.join(self.sar_statistics_path,filename.split('.')[0]+'_statistics.nc')
+                    self.stats = xr.open_dataset(stats_file)
+
+                    # Extract the statistics and add them to the row
+                    row['max_component'] = [self.stats['max_component'].values]
+                    row['max_component_coherence'] = [self.stats['max_component_coherence'].values]
+                    row['anisotropy'] = [self.stats['anisotropy'].values]
+                    row['phase_coherence_max'] = [self.stats['phase_coherence_max'].values]
+                    row['max_phase_coherence'] = [self.stats['max_phase_coherence'].values]
+                    row['min_phase_coherence'] = [self.stats['min_phase_coherence'].values]
+                    row['mean_phase_coherence'] = [self.stats['mean_phase_coherence'].values]
+                    row['f_bins'] = [self.stats['f_bins'].values]
+                except Exception as e:
+                    print(f'Could not add statistics')
+                    print(f'Error: {type(e).__name__}: {e}')
+                    traceback.print_exc()
             db = pd.concat([db,row])
 
         db = db.reset_index(drop=True)

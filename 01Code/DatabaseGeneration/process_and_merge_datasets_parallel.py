@@ -10,6 +10,7 @@ import multiprocessing as mp
 # Extract raw primitives from config for parallel computing
 sar_src = str(config.sar_src_path)
 sar_dst = str(config.sar_dst_path)
+sar_statistics_path = str(config.sar_statistics_path)
 db_path = str(config.db_path)
 fino_dst_path = str(config.fino_dst_path)
 images_path = str(config.images_path)
@@ -27,6 +28,7 @@ def SAR_worker(file_path, sar_src, sar_dst, lat, lon, width, height):
     sp = SARProcessor(
         sar_src_path=sar_src,
         sar_dst_path=sar_dst,
+        sar_statistics_path=sar_statistics_path,
         lat=lat,
         lon=lon,
         width=width,
@@ -41,12 +43,13 @@ def DB_worker(idx, db_path, sar_dst, fino_dst_path, images_path):
     from Database import Database
     db = Database(db_path,sar_src_path=sar_dst,fino_src_path=fino_dst_path,images_path=images_path)
     db.load_db()
-    db.generate_db_images_for_single_product(idx)
+    db.generate_db_images_spectral_analysis(idx)
+    # db.generate_db_images_for_single_product(idx,fft=False,AC=False)
     return idx
 
 # Process all FINO1 data files in fino_src_path and store them in fino_dst_path
-# fp = FINO1Processor.FINO1Processor(fino_src_path=config.fino_src_path,fino_dst_path=config.fino_dst_path)
-# fp.process_fino_files()
+fp = FINO1Processor.FINO1Processor(fino_src_path=config.fino_src_path,fino_dst_path=config.fino_dst_path)
+fp.process_fino_files()
 
 # Process all pre-processed SAR SLC files in sar_src_path and store them in sar_dst_path
 # sp = SARProcessor.SARProcessor(sar_src_path=config.sar_src_path,sar_dst_path=config.sar_dst_path,lat=config.lat,lon=config.lon,\
@@ -56,7 +59,7 @@ def DB_worker(idx, db_path, sar_dst, fino_dst_path, images_path):
 # 1. Gather all SAR source files
 # sar_files = glob.glob(os.path.join(config.sar_src_path, "*.nc"))
 
-# with ProcessPoolExecutor(max_workers=8) as executor:
+# with ProcessPoolExecutor(max_workers=16) as executor:
 #     futures = [
 #         executor.submit(
 #             SAR_worker, f, sar_src, sar_dst, lat, lon, width, height
@@ -71,19 +74,19 @@ def DB_worker(idx, db_path, sar_dst, fino_dst_path, images_path):
 #             print(f"Error: {e}")
 
 # Merge datasets by assigning the closes measurement to each SAR measurement and generate a database dataframe
-db = Database.Database(config.db_path,sar_src_path=config.sar_dst_path,fino_src_path=config.fino_dst_path,images_path=config.images_path)
+db = Database.Database(config.db_path,sar_src_path=config.sar_dst_path,sar_statistics_path=config.sar_statistics_path,fino_src_path=config.fino_dst_path,images_path=config.images_path)
 db.merge_datasets()
 
-with ProcessPoolExecutor(max_workers=8) as executor:
-    futures = [
-        executor.submit(
-            DB_worker, idx, db_path, sar_dst, fino_dst_path, images_path
-        )
-        for idx, row in db.db.iterrows()
-    ]
+# with ProcessPoolExecutor(max_workers=16) as executor:
+#     futures = [
+#         executor.submit(
+#             DB_worker, idx, db_path, sar_dst, fino_dst_path, images_path
+#         )
+#         for idx, row in db.db.iterrows()
+#     ]
 
-    for future in as_completed(futures):
-        try:
-            print(f"Finished: {future.result()}")
-        except Exception as e:
-            print(f"Error: {e}")
+#     for future in as_completed(futures):
+#         try:
+#             print(f"Finished: {future.result()}")
+#         except Exception as e:
+#             print(f"Error: {e}")

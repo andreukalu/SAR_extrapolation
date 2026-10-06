@@ -353,12 +353,6 @@ class AtmosphericProcessor:
         """
         # Mixing ratio r (kg/kg)
         r = self.mixing_ratio(T, RH, P)
-
-        if P <= 0 or P > 1e20:
-            # Pressure corrupted: compute virtual temperature T_v directly.
-            # No potential temperature scaling possible without valid P.
-            T_v = T * (1.0 + 0.61 * r)
-            return T_v
     
         # Dry potential temperature theta
         theta = T * (100000.0 / P) ** (self.R / self.Cp)

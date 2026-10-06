@@ -38,7 +38,7 @@ import numpy as np
 """
 class SARProcessor:
 
-    def __init__(self,sar_src_path,sar_dst_path='',sar_file_name='',lat=0,lon=0,width=3500,height=3500):
+    def __init__(self,sar_src_path,sar_dst_path='',sar_file_name='',sar_statistics_path='',lat=0,lon=0,width=3500,height=3500):
         """
         Class constructor.
 
@@ -49,6 +49,8 @@ class SARProcessor:
             Path to the folder where all products processed by this class will be stored if saved by write_pickle function.
         sar_file_name : String (optional)
             Path to a file to be processed if only a single one is to be analyzed.
+        sar_statistics_path : String (optional)
+            Path to the folder where all statistics processed by this class will be stored if saved by write_pickle function.
         lat : float
             Target latitude (deg). All computations will be centered around this latitude.
         lon : float
@@ -64,9 +66,15 @@ class SARProcessor:
         self.sar_dst_path = sar_dst_path
         self.file_name = sar_file_name
         self.file_path = os.path.join(sar_src_path,sar_file_name)
+        self.sar_statistics_path = sar_statistics_path
 
         # Create SAR dst directory
         dirname, fname = os.path.split(self.sar_dst_path)
+        if not os.path.isdir(dirname):
+            os.makedirs(dirname)
+
+        # Create SAR statistics directory
+        dirname, fname = os.path.split(self.sar_statistics_path)
         if not os.path.isdir(dirname):
             os.makedirs(dirname)
 
@@ -125,7 +133,7 @@ class SARProcessor:
                 traceback.print_exc()
                 continue   # if inside a loop
 
-    def process_single_sar_file(self,filename,psd=True,autocorr=False,wavelet=False):
+    def process_single_sar_file(self,filename,psd=True,statistics=True,autocorr=False,wavelet=False):
             """
                 Process a single SAR .nc file within src_path. Tiles at the coordinates of interest with dimensions
                 width and height are cutted out from the complete image, thus reducing the dataset weight.
@@ -162,7 +170,7 @@ class SARProcessor:
                 del self.ds
 
                 # Save the processed tile
-                self.write_product(os.path.basename(file).split('.')[0], psd=psd, autocorr=autocorr, wavelet=wavelet)
+                self.write_product(os.path.basename(file).split('.')[0], psd=psd, statistics=statistics,autocorr=autocorr, wavelet=wavelet)
             except Exception as e:
                 print(f'Could not process file {file}')
                 print(f'Error: {type(e).__name__}: {e}')
@@ -185,7 +193,7 @@ class SARProcessor:
                 var_info = {var: (dataset.variables[var].dimensions, dataset.variables[var].shape) for var in dataset.variables}
             print(var_info)
 
-    def write_product(self,filename,psd=True,autocorr=False,wavelet=False):
+    def write_product(self,filename,psd=True,statistics=True,autocorr=False,wavelet=False):
         """
             Function to save processed tiles as pickles
         
@@ -194,9 +202,15 @@ class SARProcessor:
             File name of the pickle to be saved.
         """
 
-        # Create the pickle path
-        path = os.path.join(self.sar_dst_path,filename+'.nc')
-    
+        # Create the pickles paths
+        if psd == True or autocorr == True or wavelet == True:
+            full_path = os.path.join(self.sar_dst_path,filename+'.nc')
+
+        if statistics == True:
+            statistics_path = os.path.join(self.sar_statistics_path,filename+'_statistics.nc')
+
+        self.stats = self.tile
+
         # Add psd to the tile
         if psd:
             self.tile['psd'] = self.psd
@@ -209,7 +223,26 @@ class SARProcessor:
             self.tile['min_phase_coherence'] = self.min_phase_coherence
             self.tile['mean_phase_coherence'] = self.mean_phase_coherence
             self.tile['f_bins'] = self.f_bins
-        
+
+        if statistics:
+            self.stats['phase_coherence'] = self.phase_coherence
+            self.stats['max_component'] = self.max_component
+            self.stats['max_component_coherence'] = self.max_component_coherence
+            self.stats['anisotropy'] = self.anisotropy
+            self.stats['phase_coherence_max'] = self.phase_coherence_max
+            self.stats['max_phase_coherence'] = self.max_phase_coherence
+            self.stats['min_phase_coherence'] = self.min_phase_coherence
+            self.stats['mean_phase_coherence'] = self.mean_phase_coherence
+            self.stats['f_bins'] = self.f_bins
+            if getattr(self, "tile", None) is not None and "psd" in self.stats:
+                self.stats = self.stats.drop_vars("psd")
+            if getattr(self, "tile", None) is not None and "Sigma0_VH" in self.stats:
+                self.stats = self.stats.drop_vars("Sigma0_VH")
+            if getattr(self, "tile", None) is not None and "Sigma0_VV" in self.stats:
+                self.stats = self.stats.drop_vars("Sigma0_VV")
+            if getattr(self, "tile", None) is not None and "Sigma0_VV_no_targets" in self.stats:
+                self.stats = self.stats.drop_vars("Sigma0_VV_no_targets")
+
         # Add autocorr to the tile
         if autocorr:
             self.tile['autocorr'] = self.autocorr
@@ -218,8 +251,13 @@ class SARProcessor:
         if wavelet:
             self.tile.update(self.stats)
 
-        # Save the tile pickle
-        self.tile.to_netcdf(path)
+        if psd == True or autocorr == True or wavelet == True:
+            # Save the tile pickle
+            self.tile.to_netcdf(full_path)
+
+        if statistics == True:
+            # Save the statistics pickle
+            self.stats.to_netcdf(statistics_path)
              
     def read_file(self, file_path=''):
         """

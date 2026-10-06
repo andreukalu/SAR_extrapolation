@@ -211,6 +211,20 @@ class FINO1Processor:
         self.df : pd.Dataframe 
             Modified dataframe with the 2nd order parameters.
         """
+        # Preprocess the dataframe in order to remove outliers by interpolating them
+        self.df = self.df.sort_values("TIME").set_index("TIME", drop=False)
+        bad1 = ~np.isfinite(self.df["ATMP_21m"]) | (self.df["ATMP_21m"] <= 0) | (self.df["ATMP_21m"] > 1.1e5)
+        bad2 = ~np.isfinite(self.df["ATMP_92m"]) | (self.df["ATMP_92m"] <= 0) | (self.df["ATMP_92m"] > 1.1e5)
+        bad_pair = bad1 | bad2 | (self.df["ATMP_21m"] <= self.df["ATMP_92m"])
+
+        self.df.loc[bad_pair, ["ATMP_21m", "ATMP_92m"]] = np.nan
+
+        for col in ("ATMP_21m", "ATMP_92m"):
+            lp = np.log(self.df[col].where(self.df[col] > 0))
+            self.df[col] = np.exp(lp.interpolate(method="time", limit=6, limit_area="inside"))
+
+        self.df = self.df.reset_index(drop=True)
+
         # Instantiate the Atmospheric processor with the pre-processed FINO1 dataframe to compute
         # the second order atmospheric parameters
         ap = AtmosphericProcessor.AtmosphericProcessor(self.df,z2,z1)
