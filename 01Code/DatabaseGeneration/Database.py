@@ -72,6 +72,7 @@ class Database:
 
                     # Extract the statistics and add them to the row
                     row['max_component'] = [self.stats['max_component'].values]
+                    row['mean_component'] = [self.stats['mean_component'].values]
                     row['max_component_coherence'] = [self.stats['max_component_coherence'].values]
                     row['anisotropy'] = [self.stats['anisotropy'].values]
                     row['phase_coherence_max'] = [self.stats['phase_coherence_max'].values]
@@ -79,6 +80,7 @@ class Database:
                     row['min_phase_coherence'] = [self.stats['min_phase_coherence'].values]
                     row['mean_phase_coherence'] = [self.stats['mean_phase_coherence'].values]
                     row['f_bins'] = [self.stats['f_bins'].values]
+                    row['theta_bins'] = [self.stats['theta_bins'].values]
                 except Exception as e:
                     print(f'Could not add statistics')
                     print(f'Error: {type(e).__name__}: {e}')
@@ -194,14 +196,17 @@ class Database:
             f_x = self.tile.freq_x.values
             f_y = self.tile.freq_y.values
             phase_coherence = self.tile.phase_coherence.values
-            max_component = self.tile.max_component.values
-            max_component_coherence = self.tile.max_component_coherence.values
+            max_component_2d = self.tile.max_component.values
+            mean_component_2d = self.tile.mean_component.values
+            max_component_coherence_2d = self.tile.max_component_coherence.values
             anisotropy = self.tile.anisotropy.values
-            phase_coherence_max = self.tile.phase_coherence_max.values
-            max_phase_coherence = self.tile.max_phase_coherence.values
-            min_phase_coherence = self.tile.min_phase_coherence.values
-            mean_phase_coherence = self.tile.mean_phase_coherence.values
+            phase_coherence_max_2d = self.tile.phase_coherence_max.values
+            max_phase_coherence_2d = self.tile.max_phase_coherence.values
+            min_phase_coherence_2d = self.tile.min_phase_coherence.values
+            mean_phase_coherence_2d = self.tile.mean_phase_coherence.values
             f_bins = self.tile.f_bins.values
+            theta_bins = self.tile.theta_bins.values
+
             # Convert PSD from dB to linear
             psd = 10.0 ** (psd / 10.0)
 
@@ -235,27 +240,63 @@ class Database:
             ax1.set_title(fname, fontsize=8)
             fig.colorbar(mesh1, ax=ax1)
 
+            global_mean_component = 10*np.log10(np.nanmean(10**(mean_component_2d/10), axis=1, keepdims=True))
+            global_mean_coherence = np.nanmean(mean_phase_coherence_2d, axis=1, keepdims=True)
+
+            mask = mean_component_2d[:-1,:] < -15
+            ##############!!!!!!!!!!!! FER AQUEST FILTRE AMB EL VALOR REAL DE LA POTÈNCIA###############
+            sig_2d = (max_component_coherence_2d[:-1,:]-global_mean_component[:-1,:])*max_phase_coherence_2d[:-1,:]
+            sig_2d[mask] = 0
+            sig_2d_trim = sig_2d                       # (n_f, n_θ)
+            sig_full = np.concatenate([sig_2d_trim, sig_2d_trim], axis=1)   # (n_f, 2 n_θ)
+
+            theta_full = np.concatenate(
+                [theta_bins, theta_bins[1:] + np.pi]
+            ) 
             # --- Subplot 2: Phase coherence ---
-            ax2 = fig.add_subplot(2, 3, 2)
-            ax2.ticklabel_format(axis='both', style='sci', scilimits=(-3, -3), useMathText=True)
-            pc_db = 10 * np.log10(phase_coherence)
-            mesh2 = ax2.pcolormesh(f_x_sub, f_y_sub, pc_db, shading='auto',
-                                vmin=-10, vmax=0)
-            ax2.set_xlabel('f_y [1/m]')
-            ax2.set_ylabel('f_x [1/m]')
-            ax2.set_xlim([-1e-3, 1e-3])
-            ax2.set_ylim([-1e-3, 1e-3])
-            fig.colorbar(mesh2, ax=ax2)
+            ax2 = fig.add_subplot(2, 3, 2, projection='polar')
+            wavelength = 1.0 / f_bins
+            mesh = ax2.pcolormesh(
+                theta_full,          # angular edges (radians)
+                wavelength,              # radial edges
+                sig_full,          # (n_theta, n_f)
+                shading='auto',
+                cmap='viridis',
+                vmin=0,   # or whatever your lower bound is
+                vmax=3,
+            )
+
+            ax2.set_theta_zero_location('E')   # 0 rad to the right (= +freq_x)
+            ax2.set_theta_direction(1)         # counter-clockwise
+            ax2.set_rscale('log')
+            ax2.set_rlabel_position(270)       # radial labels position
+            ax2.set_title('Component with max coherence v1 (original)', pad=20)
+            fig.colorbar(mesh, ax=ax2, label='phase_coherence')
+
+            max_component = np.nanmax(max_component_2d,axis=1)
+            mean_component = 10*np.log10(np.nanmean(10**(mean_component_2d/10),axis=1))
+            idx = np.nanargmax(max_phase_coherence_2d, axis=1)          # (n_f,)
+            i = np.arange(max_phase_coherence_2d.shape[0])           # (n_f,)
+            max_component_coherence = max_component_coherence_2d[i, idx]   # (n_f,)
+            max_phase_coherence = np.nanmax(max_phase_coherence_2d,axis=1)
+            min_phase_coherence = np.nanmin(min_phase_coherence_2d,axis=1)
+            mean_phase_coherence = np.nanmean(mean_phase_coherence_2d,axis=1)
+            idx = np.nanargmax(max_component_2d, axis=1)          # (n_f,)
+            i = np.arange(phase_coherence_max_2d.shape[0])           # (n_f,)
+            phase_coherence_max = phase_coherence_max_2d[i, idx]   # (n_f,)
 
             # --- Subplot 3: Max component vs wavelength ---
             ax3 = fig.add_subplot(2, 3, 3)
             wavelength = 1.0 / f_bins
             ax3.plot(wavelength, max_component)
+            ax3.plot(wavelength, mean_component, label='Mean Component', linestyle='-', color='b')
             ax3.plot(wavelength, max_component_coherence, label='Max Component Coherence', linestyle='--', color='r')
+            ax3.plot(wavelength, (max_component_coherence - mean_component)*max_phase_coherence, label='Component Detection', linestyle='-', color='g')
             ax3.set_xlabel('wavelength')
             ax3.set_ylabel('PSD max component [dB normalized]')
-            ax3.set_ylim([-20, 0])
+            ax3.set_ylim([-30, 5])
             ax3.grid(True, which='both', axis='both', alpha=0.4, linestyle='--', linewidth=0.5)
+            ax3.set_xscale('log')
 
             ax3 = fig.add_subplot(2, 3, 4)
             # Render spatial tile using longitude/latitude coordinates
@@ -294,23 +335,46 @@ class Database:
             )
 
             # --- Subplot 5: Phase coherence max vs wavelength ---
-            ax5 = fig.add_subplot(2, 3, 5)
-            ax5.plot(wavelength, phase_coherence_max, color='k')
-            ax5.plot(wavelength, max_phase_coherence, label='Max Phase Coherence', linestyle='--', color='r')
-            ax5.plot(wavelength, min_phase_coherence, label='Min Phase Coherence', linestyle='--', color='r')
-            ax5.plot(wavelength, mean_phase_coherence, label='Mean Phase Coherence', linestyle='-.', color=[0.5, 0.5, 0.5])
-            ax5.set_xlabel('wavelength')
-            ax5.set_ylabel('Gamma')
-            ax5.set_ylim([0, 1])
-            # Dashed reference line at 0.1
-            ax5.axhline(y=0.1, linestyle='--', color='k')
-            ax5.grid(True, which='both', axis='both', alpha=0.4, linestyle='--', linewidth=0.5)
+            # ax5 = fig.add_subplot(2, 3, 5)
+            # ax5.plot(wavelength, phase_coherence_max, color='k')
+            # ax5.plot(wavelength, max_phase_coherence, label='Max Phase Coherence', linestyle='--', color='r')
+            # ax5.plot(wavelength, min_phase_coherence, label='Min Phase Coherence', linestyle='--', color='r')
+            # ax5.plot(wavelength, mean_phase_coherence, label='Mean Phase Coherence', linestyle='-.', color=[0.5, 0.5, 0.5])
+            # ax5.set_xlabel('wavelength')
+            # ax5.set_ylabel('Gamma')
+            # ax5.set_ylim([0, 1])
+            # # Dashed reference line at 0.1
+            # ax5.axhline(y=0.1, linestyle='--', color='k')
+            # ax5.grid(True, which='both', axis='both', alpha=0.4, linestyle='--', linewidth=0.5)
+            
+            # --- Subplot 2: Phase coherence ---
+            ax2 = fig.add_subplot(2, 3, 5, projection='polar')
+            wavelength = 1.0 / f_bins
+            mesh = ax2.pcolormesh(
+                theta_full,          # angular edges (radians)
+                wavelength,              # radial edges
+                sig_full,          # (n_theta, n_f)
+                shading='auto',
+                cmap='viridis',
+                vmin=3,   # or whatever your lower bound is
+                vmax=0,
+            )
 
+            ax2.set_theta_zero_location('E')   # 0 rad to the right (= +freq_x)
+            ax2.set_theta_direction(1)         # counter-clockwise
+            ax2.set_rscale('log')
+            ax2.set_rlabel_position(270)       # radial labels position
+            ax2.set_rlim(200, 1000)
+            ax2.set_title('Component with max coherence v2', pad=20)
+            fig.colorbar(mesh, ax=ax2, label='phase_coherence')
+           
+            
             # --- Subplot 6: Anisotropy vs wavelength ---
             ax6 = fig.add_subplot(2, 3, 6)
             ax6.plot(wavelength, anisotropy)
             ax6.set_xlabel('Wavelength')
             ax6.set_ylabel('Anisotropy')
+            ax6.set_xscale('log')
             ax6.grid(True, which='both', axis='both', alpha=0.4, linestyle='--', linewidth=0.5)
             ax6.set_ylim([0, 3])
 
