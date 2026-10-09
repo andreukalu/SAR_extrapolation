@@ -79,6 +79,10 @@ class Database:
                     row['max_phase_coherence'] = [self.stats['max_phase_coherence'].values]
                     row['min_phase_coherence'] = [self.stats['min_phase_coherence'].values]
                     row['mean_phase_coherence'] = [self.stats['mean_phase_coherence'].values]
+                    row['max_significance'] = [self.stats['max_significance'].values]
+                    row['mean_significance'] = [self.stats['mean_significance'].values]
+                    row['min_significance'] = [self.stats['min_significance'].values]
+                    
                     row['f_bins'] = [self.stats['f_bins'].values]
                     row['theta_bins'] = [self.stats['theta_bins'].values]
                 except Exception as e:
@@ -204,6 +208,10 @@ class Database:
             max_phase_coherence_2d = self.tile.max_phase_coherence.values
             min_phase_coherence_2d = self.tile.min_phase_coherence.values
             mean_phase_coherence_2d = self.tile.mean_phase_coherence.values
+            max_significance_2d = self.tile.max_significance.values
+            mean_significance_2d = self.tile.mean_significance.values
+            min_significance_2d = self.tile.min_significance.values
+            
             f_bins = self.tile.f_bins.values
             theta_bins = self.tile.theta_bins.values
 
@@ -242,11 +250,13 @@ class Database:
 
             global_mean_component = 10*np.log10(np.nanmean(10**(mean_component_2d/10), axis=1, keepdims=True))
             global_mean_coherence = np.nanmean(mean_phase_coherence_2d, axis=1, keepdims=True)
+            global_mean_significance = np.nanmean(mean_significance_2d, axis=1, keepdims=True)
 
             mask = mean_component_2d[:-1,:] < -15
             ##############!!!!!!!!!!!! FER AQUEST FILTRE AMB EL VALOR REAL DE LA POTÈNCIA###############
             sig_2d = (max_component_coherence_2d[:-1,:]-global_mean_component[:-1,:])*max_phase_coherence_2d[:-1,:]
-            sig_2d[mask] = 0
+            sig_2d = (max_significance_2d[:-1,:]-global_mean_significance[:-1,:])
+            # sig_2d[mask] = 0
             sig_2d_trim = sig_2d                       # (n_f, n_θ)
             sig_full = np.concatenate([sig_2d_trim, sig_2d_trim], axis=1)   # (n_f, 2 n_θ)
 
@@ -263,7 +273,7 @@ class Database:
                 shading='auto',
                 cmap='viridis',
                 vmin=0,   # or whatever your lower bound is
-                vmax=3,
+                vmax=10,
             )
 
             ax2.set_theta_zero_location('E')   # 0 rad to the right (= +freq_x)
@@ -347,6 +357,12 @@ class Database:
             # ax5.axhline(y=0.1, linestyle='--', color='k')
             # ax5.grid(True, which='both', axis='both', alpha=0.4, linestyle='--', linewidth=0.5)
             
+            
+            sig_2d = (mean_component_2d[:-1,:]-global_mean_component[:-1,:])
+            # sig_2d[mask] = 0
+            sig_2d_trim = sig_2d                       # (n_f, n_θ)
+            sig_full = np.concatenate([sig_2d_trim, sig_2d_trim], axis=1)   # (n_f, 2 n_θ)
+
             # --- Subplot 2: Phase coherence ---
             ax2 = fig.add_subplot(2, 3, 5, projection='polar')
             wavelength = 1.0 / f_bins
@@ -356,27 +372,54 @@ class Database:
                 sig_full,          # (n_theta, n_f)
                 shading='auto',
                 cmap='viridis',
-                vmin=3,   # or whatever your lower bound is
-                vmax=0,
+                vmin=0,   # or whatever your lower bound is
+                vmax=5,
             )
 
             ax2.set_theta_zero_location('E')   # 0 rad to the right (= +freq_x)
             ax2.set_theta_direction(1)         # counter-clockwise
             ax2.set_rscale('log')
             ax2.set_rlabel_position(270)       # radial labels position
-            ax2.set_rlim(200, 1000)
+            # ax2.set_rlim(200, 1000)
             ax2.set_title('Component with max coherence v2', pad=20)
             fig.colorbar(mesh, ax=ax2, label='phase_coherence')
            
             
             # --- Subplot 6: Anisotropy vs wavelength ---
-            ax6 = fig.add_subplot(2, 3, 6)
-            ax6.plot(wavelength, anisotropy)
-            ax6.set_xlabel('Wavelength')
-            ax6.set_ylabel('Anisotropy')
-            ax6.set_xscale('log')
-            ax6.grid(True, which='both', axis='both', alpha=0.4, linestyle='--', linewidth=0.5)
-            ax6.set_ylim([0, 3])
+            # ax6 = fig.add_subplot(2, 3, 6)
+            # ax6.plot(wavelength, mean_phase_coherence_2d)
+            # ax6.set_xlabel('Wavelength')
+            # ax6.set_ylabel('Anisotropy')
+            # ax6.set_xscale('log')
+            # ax6.grid(True, which='both', axis='both', alpha=0.4, linestyle='--', linewidth=0.5)
+            # ax6.set_ylim([0, 3])
+
+
+            sig_2d = (mean_phase_coherence_2d[:-1,:]-global_mean_coherence[:-1,:])
+            # sig_2d[mask] = 0
+            sig_2d_trim = sig_2d                       # (n_f, n_θ)
+            sig_full = np.concatenate([sig_2d_trim, sig_2d_trim], axis=1)   # (n_f, 2 n_θ)
+
+            # --- Subplot 2: Phase coherence ---
+            ax2 = fig.add_subplot(2, 3, 6, projection='polar')
+            wavelength = 1.0 / f_bins
+            mesh = ax2.pcolormesh(
+                theta_full,          # angular edges (radians)
+                wavelength,              # radial edges
+                sig_full,          # (n_theta, n_f)
+                shading='auto',
+                cmap='viridis',
+                vmin=0,   # or whatever your lower bound is
+                vmax=0.5,
+            )
+
+            ax2.set_theta_zero_location('E')   # 0 rad to the right (= +freq_x)
+            ax2.set_theta_direction(1)         # counter-clockwise
+            ax2.set_rscale('log')
+            ax2.set_rlabel_position(270)       # radial labels position
+            # ax2.set_rlim(200, 1000)
+            ax2.set_title('Component with max coherence v2', pad=20)
+            fig.colorbar(mesh, ax=ax2, label='phase_coherence')
 
             # --- Save ---
             base = fname[:-3] if fname.endswith('.nc') else fname

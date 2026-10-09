@@ -48,11 +48,11 @@ def DB_worker(idx, db_path, sar_dst, fino_dst_path, images_path):
     return idx
 
 # Process all FINO1 data files in fino_src_path and store them in fino_dst_path
-fp = FINO1Processor.FINO1Processor(fino_src_path=config.fino_src_path,fino_dst_path=config.fino_dst_path)
-fp.process_fino_files()
+# fp = FINO1Processor.FINO1Processor(fino_src_path=config.fino_src_path,fino_dst_path=config.fino_dst_path)
+# fp.process_fino_files()
 
 # Process all pre-processed SAR SLC files in sar_src_path and store them in sar_dst_path
-# sp = SARProcessor.SARProcessor(sar_src_path=config.sar_src_path,sar_dst_path=config.sar_dst_path,lat=config.lat,lon=config.lon,\
+# sp = SARProcessor(sar_src_path=config.sar_src_path,sar_dst_path=config.sar_dst_path,sar_statistics_path=config.sar_statistics_path,lat=config.lat,lon=config.lon,\
 #                                 width=config.width,height=config.height)
 # sp.process_sar_files()
 
@@ -75,18 +75,19 @@ fp.process_fino_files()
 
 # Merge datasets by assigning the closes measurement to each SAR measurement and generate a database dataframe
 db = Database.Database(config.db_path,sar_src_path=config.sar_dst_path,sar_statistics_path=config.sar_statistics_path,fino_src_path=config.fino_dst_path,images_path=config.images_path)
-db.merge_datasets()
+# db.merge_datasets()
+db.load_db()
 
-# with ProcessPoolExecutor(max_workers=16) as executor:
-#     futures = [
-#         executor.submit(
-#             DB_worker, idx, db_path, sar_dst, fino_dst_path, images_path
-#         )
-#         for idx, row in db.db.iterrows()
-#     ]
+with ProcessPoolExecutor(max_workers=16) as executor:
+    futures = [
+        executor.submit(
+            DB_worker, idx, db_path, sar_dst, fino_dst_path, images_path
+        )
+        for idx, row in db.db.iterrows()
+    ]
 
-#     for future in as_completed(futures):
-#         try:
-#             print(f"Finished: {future.result()}")
-#         except Exception as e:
-#             print(f"Error: {e}")
+    for future in as_completed(futures):
+        try:
+            print(f"Finished: {future.result()}")
+        except Exception as e:
+            print(f"Error: {e}")

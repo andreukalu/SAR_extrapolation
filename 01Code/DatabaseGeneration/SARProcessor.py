@@ -94,7 +94,7 @@ class SARProcessor:
             
             IMPORTANT! this function requires that fino_path is defined and pointing to the FINO1 dataframe
         """
-
+        print('Processing all SAR files')
         # Get all the available files in src_path
         files = glob.glob(os.path.join(self.src_path,'*.nc'))
 
@@ -223,6 +223,10 @@ class SARProcessor:
             self.tile['max_phase_coherence'] = (('freq', 'theta'), self.max_phase_coherence)
             self.tile['min_phase_coherence'] = (('freq', 'theta'), self.min_phase_coherence)
             self.tile['mean_phase_coherence'] = (('freq', 'theta'), self.mean_phase_coherence)
+            self.tile['max_significance'] = (('freq', 'theta'), self.max_significance)
+            self.tile['mean_significance'] = (('freq', 'theta'), self.mean_significance)
+            self.tile['min_significance'] = (('freq', 'theta'), self.min_significance)
+            
             self.tile['f_bins'] = self.f_bins
             self.tile['theta_bins'] = self.theta_bins
 
@@ -236,6 +240,9 @@ class SARProcessor:
             self.tile['max_phase_coherence'] = (('freq', 'theta'), self.max_phase_coherence)
             self.tile['min_phase_coherence'] = (('freq', 'theta'), self.min_phase_coherence)
             self.tile['mean_phase_coherence'] = (('freq', 'theta'), self.mean_phase_coherence)
+            self.tile['max_significance'] = (('freq', 'theta'), self.max_significance)
+            self.tile['mean_significance'] = (('freq', 'theta'), self.mean_significance)
+            self.tile['min_significance'] = (('freq', 'theta'), self.min_significance)
             self.stats['f_bins'] = self.f_bins
             self.stats['theta_bins'] = self.theta_bins
             if getattr(self, "tile", None) is not None and "psd" in self.stats:
@@ -736,6 +743,7 @@ class SARProcessor:
         max_component, mean_component, max_component_coherence = self.compute_max_psd_component_f(f_bins,theta_bins)
         anisotropy = self.compute_anisotropy_f(f_bins)
         phase_coherence_max, max_phase_coherence, min_phase_coherence, mean_phase_coherence = self.compute_phase_coherence_f(f_bins,theta_bins)
+        max_significance, mean_significance, min_significance = self.compute_component_significance(f_bins,theta_bins)
 
         # Preserve metadata attributes
         psd_da.attrs['units'] = unit_label
@@ -755,6 +763,9 @@ class SARProcessor:
         self.max_phase_coherence = max_phase_coherence
         self.min_phase_coherence = min_phase_coherence
         self.mean_phase_coherence = mean_phase_coherence
+        self.max_significance = max_significance
+        self.mean_significance = mean_significance
+        self.min_significance = min_significance
         self.f_bins = f_bins
         self.theta_bins = theta_bins
         
@@ -798,10 +809,54 @@ class SARProcessor:
                     coh_bin = coh_values[mask]
 
                     max_component[i, j]  = np.max(psd_bin)
-                    mean_component[i, j] = np.mean(psd_bin)
+                    mean_component[i, j] = 10*np.log10(np.mean(10**(psd_bin/10)))
                     max_component_coherence[i, j] = psd_bin[np.argmax(coh_bin)]
 
             return max_component, mean_component, max_component_coherence
+
+    def compute_component_significance(self, f_bins=np.arange(1e-4, 5e-3, 1e-4),theta_bins=np.deg2rad(np.arange(0, 181, 15))):
+                """
+                Computes the anisotropy factor f from the 2D PSD DataArray.
+        
+                Params:
+                psd_da : xr.DataArray
+                    2D Power Spectral Density DataArray with dimensions ('freq_y', 'freq_x').
+        
+                Returns:
+                anisotropy : float
+                    Anisotropy vector, defined as the ratio of the maximum to minimum PSD values for each frequency.
+                """
+                fx = self.psd['freq_x'].values
+                fy = self.psd['freq_y'].values
+                FX, FY = np.meshgrid(fx, fy, indexing='xy')
+    
+                F = np.sqrt(FX**2 + FY**2)
+                THETA = np.mod(np.arctan2(FY, FX), np.pi)   # symmetry: [0, pi)
+                
+                psd_values = 10**(self.psd.values/10)
+                coh_values = self.phase_coherence.values
+
+                significance = 10*np.log10(psd_values*coh_values)
+                
+                n_f = len(f_bins) - 1
+                n_t = len(theta_bins) - 1
+    
+                max_significance    = np.full((n_f, n_t), np.nan)
+                mean_significance   = np.full((n_f, n_t), np.nan)
+                min_significance    = np.full((n_f, n_t), np.nan)
+    
+                for i, (f_min, f_max) in enumerate(zip(f_bins[:-1], f_bins[1:])):
+                    for j, (t_min, t_max) in enumerate(zip(theta_bins[:-1], theta_bins[1:])):
+                        mask = (F >= f_min) & (F < f_max) & (THETA >= t_min) & (THETA < t_max)
+                        if not np.any(mask):
+                            continue
+                        significance_bin = significance[mask]
+    
+                        max_significance[i, j]  = np.nanmax(significance_bin)
+                        mean_significance[i, j] = np.nanmean(significance_bin)
+                        min_significance[i, j] = np.nanmin(significance_bin)
+    
+                return max_significance, mean_significance, min_significance
     
     def compute_anisotropy_f(self, f_bins=np.arange(1e-4, 5e-3, 1e-4)):
         """
