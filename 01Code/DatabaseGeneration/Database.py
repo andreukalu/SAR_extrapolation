@@ -95,6 +95,9 @@ class Database:
         # Add created db to the database
         self.db = db
 
+        # Identify the atmospheric structures in the database
+        self.db = self.structure_identification()
+        
         # Save the database into a pickle
         self.save_db_to_pickle()
 
@@ -154,6 +157,60 @@ class Database:
 
         return tile
 
+    def structure_identification(self, num_structures = 10):
+        df = self.db
+        if 'structures' not in df.columns:
+            df['structures'] = None
+        df['structures'] = df['structures'].astype(object)
+        for idx, row in df.iterrows():
+            f_bins = row['f_bins']
+            theta_bins = row['theta_bins']
+            wavelengths = 1/f_bins[:-1]
+            theta_bins = theta_bins[:-1]
+
+            mean_significance_2d = row['mean_significance']
+            max_significance_2d = row['max_significance']
+            global_mean_significance = np.nanmean(mean_significance_2d, axis=1, keepdims=True)
+            significance_2d = (max_significance_2d-global_mean_significance)
+            max_component_coherence = row['max_component_coherence']
+            max_component = row['max_component']
+            mean_component = row['mean_component']
+            mean_coherence = row['mean_phase_coherence']
+
+            theta_2d, wavelengths_2d = np.meshgrid(theta_bins,wavelengths)
+            mask = (wavelengths_2d>=1000) & (wavelengths_2d <= 5000)
+
+            max_component_coherence = max_component_coherence[mask]
+            max_component = max_component[mask]
+            significance = significance_2d[mask]
+
+            internal_wavelengths = wavelengths_2d[mask]
+            internal_theta = theta_2d[mask]
+            components_magnitudes = mean_component[mask]
+            component_coherence = mean_coherence[mask]
+
+
+            most_significant_components = []
+            most_significant_idx = np.argsort(significance, axis=None)[::-1]
+
+            n = 0
+            for component_idx in most_significant_idx:
+                if np.isnan(significance.ravel()[component_idx]):
+                    continue
+
+                component_dict = {'significance':significance.ravel()[component_idx],
+                                'magnitude': components_magnitudes.ravel()[component_idx],
+                                'coherence':component_coherence.ravel()[component_idx],
+                                'wavelength':internal_wavelengths.ravel()[component_idx],
+                                'theta':np.degrees(internal_theta.ravel()[component_idx])}
+                most_significant_components.append(component_dict)
+                n += 1
+                if n >= num_structures - 1:
+                    break
+                    
+            df.at[idx, 'components'] = most_significant_components
+        return df
+    
     ######### PLOT FUNCTIONS #########
     def generate_db_images(self,images_path=''):
         """
@@ -179,6 +236,96 @@ class Database:
             except:
                 print('Some printing failed')
             print(f'Image saved at {self.images_path}')
+
+    def generate_db_images_structure_analysis(self, images_path):
+
+        if images_path != '':
+            self.images_path = images_path
+        else:
+            images_path=self.images_path
+
+        flat = pd.json_normalize(
+            self.db.to_dict("records"),
+            record_path="components",
+            meta="filename"   # keep whatever parent id you have; drop if none
+        )
+
+        df = flat.copy()
+        df["short"] = df["filename"]
+
+        # Fix color scales across all files so panels are comparable
+        sig_lo, sig_hi = df["significance"].quantile([0.05, 0.95])
+        mag_lo, mag_hi = df["magnitude"].quantile([0.05, 0.95])
+        wl_lo,  wl_hi  = df["wavelength"].quantile([0.0, 1.0])
+        coh_lo, coh_hi = df["coherence"].quantile([0.05, 0.95])
+
+        def plot_file(sub):
+            fname = sub["short"].iloc[0]
+            fig = plt.figure(figsize=(12, 9))
+            fig.suptitle(fname, fontsize=13, y=0.98)
+
+            # ── 1) Polar: wavelength vs theta, color = magnitude ─────────────
+            ax1 = fig.add_subplot(2, 2, 1, projection="polar")
+            sc = ax1.scatter(
+                np.deg2rad(sub["theta"]), sub["wavelength"],
+                c=sub["coherence"], cmap="coolwarm",
+                vmin=coh_lo, vmax=coh_hi,
+                s=sub["significance"]*20, edgecolor="k", linewidth=0.5
+            )
+            ax1.set_theta_zero_location("N")
+            ax1.set_theta_direction(-1)
+            ax1.set_title("wavelength vs theta\n(color=magnitude, size=significance)", fontsize=10)
+            plt.colorbar(sc, ax=ax1, shrink=0.75, pad=0.1)
+
+            # ── 2) significance vs coherence, color = wavelength ─────────────
+            ax2 = fig.add_subplot(2, 2, 2)
+            sc = ax2.scatter(
+                sub["significance"], sub["coherence"],
+                c=sub["wavelength"], cmap="viridis",
+                vmin=wl_lo, vmax=wl_hi,
+                s=80, edgecolor="k"
+            )
+            ax2.set_xlabel("significance")
+            ax2.set_ylabel("coherence")
+            ax2.set_title("significance vs coherence\n(color=wavelength)", fontsize=10)
+            plt.colorbar(sc, ax=ax2, shrink=0.85)
+
+            # ── 3) magnitude vs wavelength, color = theta ────────────────────
+            ax3 = fig.add_subplot(2, 2, 3)
+            sc = ax3.scatter(
+                sub["wavelength"], sub["magnitude"],
+                c=sub["theta"], cmap="twilight",
+                s=80, edgecolor="k"
+            )
+            ax3.set_xlabel("wavelength")
+            ax3.set_ylabel("magnitude")
+            ax3.set_title("magnitude vs wavelength\n(color=theta)", fontsize=10)
+            plt.colorbar(sc, ax=ax3, shrink=0.85, label="theta (°)")
+
+            # ── 4) Bar chart: significance per structure, labeled by theta ───
+            ax4 = fig.add_subplot(2, 2, 4)
+            order = sub.sort_values("theta").reset_index(drop=True)
+            labels = [f"{t:.0f}°" for t in order["theta"]]
+            bars = ax4.bar(range(len(order)), order["significance"],
+                        color=plt.cm.viridis(
+                            (order["coherence"] - coh_lo) / (coh_hi - coh_lo + 1e-9)
+                        ),
+                        edgecolor="k")
+            ax4.set_xticks(range(len(order)))
+            ax4.set_xticklabels(labels, rotation=45)
+            ax4.set_xlabel("theta (°)")
+            ax4.set_ylabel("significance")
+            ax4.set_title("significance per structure\n(bar color = coherence)", fontsize=10)
+
+            plt.tight_layout(rect=[0, 0, 1, 0.96])
+            
+            base = fname[:-3] if fname.endswith('.nc') else fname
+            out_path = os.path.join(images_path, f'{base}_analysis.png')
+            fig.savefig(out_path, dpi=300, bbox_inches='tight')
+
+        # ── Loop over every file ─────────────────────────────────────────────
+        for fname, sub in df.groupby("filename"):
+            plot_file(sub)
 
     def generate_db_images_spectral_analysis(self,product_index,images_path=''):
         
@@ -296,17 +443,17 @@ class Database:
             phase_coherence_max = phase_coherence_max_2d[i, idx]   # (n_f,)
 
             # --- Subplot 3: Max component vs wavelength ---
-            ax3 = fig.add_subplot(2, 3, 3)
-            wavelength = 1.0 / f_bins
-            ax3.plot(wavelength, max_component)
-            ax3.plot(wavelength, mean_component, label='Mean Component', linestyle='-', color='b')
-            ax3.plot(wavelength, max_component_coherence, label='Max Component Coherence', linestyle='--', color='r')
-            ax3.plot(wavelength, (max_component_coherence - mean_component)*max_phase_coherence, label='Component Detection', linestyle='-', color='g')
-            ax3.set_xlabel('wavelength')
-            ax3.set_ylabel('PSD max component [dB normalized]')
-            ax3.set_ylim([-30, 5])
-            ax3.grid(True, which='both', axis='both', alpha=0.4, linestyle='--', linewidth=0.5)
-            ax3.set_xscale('log')
+            # ax3 = fig.add_subplot(2, 3, 3)
+            # wavelength = 1.0 / f_bins
+            # ax3.plot(wavelength, max_component)
+            # ax3.plot(wavelength, mean_component, label='Mean Component', linestyle='-', color='b')
+            # ax3.plot(wavelength, max_component_coherence, label='Max Component Coherence', linestyle='--', color='r')
+            # ax3.plot(wavelength, (max_component_coherence - mean_component)*max_phase_coherence, label='Component Detection', linestyle='-', color='g')
+            # ax3.set_xlabel('wavelength')
+            # ax3.set_ylabel('PSD max component [dB normalized]')
+            # ax3.set_ylim([-30, 5])
+            # ax3.grid(True, which='both', axis='both', alpha=0.4, linestyle='--', linewidth=0.5)
+            # ax3.set_xscale('log')
 
             ax3 = fig.add_subplot(2, 3, 4)
             # Render spatial tile using longitude/latitude coordinates

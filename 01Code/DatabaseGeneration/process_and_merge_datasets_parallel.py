@@ -44,6 +44,7 @@ def DB_worker(idx, db_path, sar_dst, fino_dst_path, images_path):
     db = Database(db_path,sar_src_path=sar_dst,fino_src_path=fino_dst_path,images_path=images_path)
     db.load_db()
     db.generate_db_images_spectral_analysis(idx)
+    db.generate_db_images_structure_analysis()
     # db.generate_db_images_for_single_product(idx,fft=False,AC=False)
     return idx
 
@@ -75,7 +76,7 @@ def DB_worker(idx, db_path, sar_dst, fino_dst_path, images_path):
 
 # Merge datasets by assigning the closes measurement to each SAR measurement and generate a database dataframe
 db = Database.Database(config.db_path,sar_src_path=config.sar_dst_path,sar_statistics_path=config.sar_statistics_path,fino_src_path=config.fino_dst_path,images_path=config.images_path)
-# db.merge_datasets()
+db.merge_datasets()
 db.load_db()
 
 with ProcessPoolExecutor(max_workers=16) as executor:
