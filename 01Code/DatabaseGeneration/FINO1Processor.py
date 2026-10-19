@@ -146,8 +146,9 @@ class FINO1Processor:
             data_df["TIME"] = data_df["TIME"].dt.round("min")
 
             # Check if temperature at 0 m by the metmast is valid, and remove it if not
-            if data_df['TEMP_0m'].mean() < -20:
-                data_df = data_df.drop(columns=['TEMP_0m'])
+            if 'TEMP_0m' in data_df.columns:
+                if data_df['TEMP_0m'].mean() < -20:
+                    data_df = data_df.drop(columns=['TEMP_0m'])
 
             # Check if a dataframe is existent and update it with the new one
             if getattr(self, "df", None) is not None:

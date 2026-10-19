@@ -6,6 +6,7 @@ import os
 import glob
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing as mp
+import traceback
 
 # Extract raw primitives from config for parallel computing
 sar_src = str(config.sar_src_path)
@@ -18,6 +19,9 @@ lat = float(config.lat)
 lon = float(config.lon)
 width = int(config.width)
 height = int(config.height)
+f_bins = config.f_bins
+theta_bins = config.theta_bins
+bins_dict_list = config.bins_dict_list
 
 # Define worker functions for parallel processing of the DB
 # Define worker for SAR processing
@@ -33,6 +37,9 @@ def SAR_worker(file_path, sar_src, sar_dst, lat, lon, width, height):
         lon=lon,
         width=width,
         height=height,
+        f_bins=f_bins,
+        theta_bins=theta_bins,
+        bins_dict_list=bins_dict_list
     )
     sp.process_single_sar_file(file_path)
     return file_path
@@ -43,8 +50,8 @@ def DB_worker(idx, db_path, sar_dst, fino_dst_path, images_path):
     from Database import Database
     db = Database(db_path,sar_src_path=sar_dst,fino_src_path=fino_dst_path,images_path=images_path)
     db.load_db()
-    db.generate_db_images_spectral_analysis(idx)
-    db.generate_db_images_structure_analysis()
+    # db.generate_db_images_spectral_analysis(idx)
+    db.generate_db_images_structure_analysis(idx)
     # db.generate_db_images_for_single_product(idx,fft=False,AC=False)
     return idx
 
@@ -54,7 +61,7 @@ def DB_worker(idx, db_path, sar_dst, fino_dst_path, images_path):
 
 # Process all pre-processed SAR SLC files in sar_src_path and store them in sar_dst_path
 # sp = SARProcessor(sar_src_path=config.sar_src_path,sar_dst_path=config.sar_dst_path,sar_statistics_path=config.sar_statistics_path,lat=config.lat,lon=config.lon,\
-#                                 width=config.width,height=config.height)
+#                                 width=config.width,height=config.height,f_bins=config.f_bins,theta_bins=config.theta_bins,bins_dict_list=config.bins_dict_list)
 # sp.process_sar_files()
 
 # 1. Gather all SAR source files
@@ -70,7 +77,7 @@ def DB_worker(idx, db_path, sar_dst, fino_dst_path, images_path):
 
 #     for future in as_completed(futures):
 #         try:
-#             print(f"Finished: {future.result()}")
+#             print(f"Finished: {future.result()}",flush=True)
 #         except Exception as e:
 #             print(f"Error: {e}")
 
@@ -89,6 +96,7 @@ with ProcessPoolExecutor(max_workers=16) as executor:
 
     for future in as_completed(futures):
         try:
-            print(f"Finished: {future.result()}")
+            print(f"Finished: {future.result()}",flush=True)
         except Exception as e:
             print(f"Error: {e}")
+            print(traceback.print_exc(),flush=True)
