@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from scipy.ndimage import uniform_filter, maximum_filter
 from scipy.signal import detrend
+from scipy.optimize import least_squares
 import scipy
 import traceback
 import glob
@@ -214,8 +215,10 @@ class SARProcessor:
         # Add psd to the tile
         if psd:
             self.tile['psd'] = self.psd
+            self.tile['psd_max'] = self.psd_max
             self.tile['phase_coherence'] = self.phase_coherence
             self.tile['max_component'] = (('freq', 'theta'), self.max_component)
+            self.tile['min_component'] = (('freq', 'theta'), self.min_component)
             self.tile['mean_component'] = (('freq', 'theta'), self.mean_component)
             self.tile['max_component_coherence'] = (('freq', 'theta'), self.max_component_coherence)
             self.tile['anisotropy'] = self.anisotropy
@@ -226,6 +229,14 @@ class SARProcessor:
             self.tile['max_significance'] = (('freq', 'theta'), self.max_significance)
             self.tile['mean_significance'] = (('freq', 'theta'), self.mean_significance)
             self.tile['min_significance'] = (('freq', 'theta'), self.min_significance)
+            self.tile['beta'] = self.beta
+            self.tile['amplitude'] = self.amplitude
+            self.tile['C'] = self.C
+            self.tile['f0'] = self.f0
+            self.tile['detrended_psd'] = (('freq_x', 'freq_y'), self.detrended_psd)
+            self.tile['model_psd'] = (('freq_x', 'freq_y'), self.model_psd)
+            self.tile['fit_rmse'] = self.fit_rmse
+            self.stats['f_bins'] = self.f_bins
             
             self.tile['f_bins'] = self.f_bins
             self.tile['theta_bins'] = self.theta_bins
@@ -233,6 +244,7 @@ class SARProcessor:
         if statistics:
             self.tile['phase_coherence'] = self.phase_coherence
             self.tile['max_component'] = (('freq', 'theta'), self.max_component)
+            self.tile['min_component'] = (('freq', 'theta'), self.min_component)
             self.tile['mean_component'] = (('freq', 'theta'), self.mean_component)
             self.tile['max_component_coherence'] = (('freq', 'theta'), self.max_component_coherence)
             self.tile['anisotropy'] = self.anisotropy
@@ -243,6 +255,14 @@ class SARProcessor:
             self.tile['max_significance'] = (('freq', 'theta'), self.max_significance)
             self.tile['mean_significance'] = (('freq', 'theta'), self.mean_significance)
             self.tile['min_significance'] = (('freq', 'theta'), self.min_significance)
+            self.tile['psd_max'] = self.psd_max
+            self.tile['beta'] = self.beta
+            self.tile['amplitude'] = self.amplitude
+            self.tile['C'] = self.C
+            self.tile['f0'] = self.f0
+            self.tile['detrended_psd'] = (('freq_x', 'freq_y'), self.detrended_psd)
+            self.tile['model_psd'] = (('freq_x', 'freq_y'), self.model_psd)
+            self.tile['fit_rmse'] = self.fit_rmse
             self.stats['f_bins'] = self.f_bins
             self.stats['theta_bins'] = self.theta_bins
             if getattr(self, "tile", None) is not None and "psd" in self.stats:
@@ -689,7 +709,7 @@ class SARProcessor:
                 fft2_tile = np.fft.fft2(tile_windowed)
                 yc = y + ty / 2
                 xc = x + tx / 2
-                phi2_tile = np.angle(fft2_tile) - 2*np.pi*(np.fft.fftfreq(ty)[:, None] * yc + np.fft.fftfreq(tx)[None, :] * xc)
+                phi2_tile = np.angle(fft2_tile) + 2*np.pi*(np.fft.fftfreq(ty)[:, None] * yc + np.fft.fftfreq(tx)[None, :] * xc)
                 power_tile = (np.abs(fft2_tile)**2) / win_norm
                 
                 psd_accumulator += power_tile
@@ -706,7 +726,10 @@ class SARProcessor:
         phase_coherence_shifted = np.fft.fftshift(phase_coherence)
 
         if normalize:
+            self.psd_max = np.max(psd_shifted)
             psd_shifted = psd_shifted/np.max(psd_shifted)
+        else:
+            self.psd_max = np.nan
 
         # Convert to dB scale if requested
         if return_db:
@@ -740,10 +763,11 @@ class SARProcessor:
         self.phase_coherence = phase_coherence_da
         self.psd = psd_da
 
-        max_component, mean_component, max_component_coherence = self.compute_max_psd_component_f(f_bins,theta_bins)
+        max_component, min_component, mean_component, max_component_coherence = self.compute_max_psd_component_f(f_bins,theta_bins)
         anisotropy = self.compute_anisotropy_f(f_bins)
         phase_coherence_max, max_phase_coherence, min_phase_coherence, mean_phase_coherence = self.compute_phase_coherence_f(f_bins,theta_bins)
         max_significance, mean_significance, min_significance = self.compute_component_significance(f_bins,theta_bins)
+        amplitude, beta, C, f0, detrended_psd, model_psd, fit_rmse = self.fit_psd_trend()
 
         # Preserve metadata attributes
         psd_da.attrs['units'] = unit_label
@@ -756,6 +780,7 @@ class SARProcessor:
         self.psd = psd_da
         self.phase_coherence = phase_coherence_da
         self.max_component = max_component
+        self.min_component = min_component
         self.mean_component = mean_component
         self.max_component_coherence = max_component_coherence
         self.anisotropy = anisotropy
@@ -766,11 +791,86 @@ class SARProcessor:
         self.max_significance = max_significance
         self.mean_significance = mean_significance
         self.min_significance = min_significance
+        self.beta = beta
+        self.amplitude = amplitude
+        self.C = C
+        self.f0 = f0
+        self.detrended_psd = detrended_psd
+        self.model_psd = model_psd
+        self.fit_rmse = fit_rmse
         self.f_bins = f_bins
         self.theta_bins = theta_bins
         
         return psd_da
 
+    def fit_psd_trend(self, f_lim = 1e-2, in_db=True):
+        fx = self.psd['freq_x'].values
+        fy = self.psd['freq_y'].values
+        FX, FY = np.meshgrid(fx, fy, indexing='xy')
+        F = np.hypot(FX, FY)
+
+        psd = self.psd.values
+        coh = self.phase_coherence.values
+        mask = F <= f_lim
+
+        psd_fit = psd[mask]
+        F_fit = F[mask]
+
+        # convert to linear power once; fit in log space
+        if in_db:
+            psd_lin_fit = 10.0 ** (psd_fit / 10.0)
+            psd_lin_all = 10.0 ** (psd / 10.0)
+        else:
+            psd_lin_fit = psd_fit
+            psd_lin_all = psd
+
+        good = (F_fit > 0) & np.isfinite(psd_lin_fit) & (psd_lin_fit > 0)
+        f = F_fit[good].ravel()
+        y = 10*np.log10(psd_lin_fit[good].ravel())     # log10 of measured power
+
+        # model: log(A) + sum(a_n log(x + c_n))
+        # parametrize C >= 0 via softplus, A > 0 via exp, beta free-ish
+        def residual(p):
+            logA, an1, an2, f01, f02 = p
+            A = 10.0 ** (logA / 10)
+            C = 10.0 ** (logC / 10)
+            A = 1-C
+            model = 10*np.log10(A / (1 + (f/f0) ** 2)**(beta/2) + C)
+            return model - y
+
+        f0_0 = 1e-3
+        mask = f < f0_0
+        # initial guess from the plain power-law fit (C small)
+        f0 = 2e-4
+        slope, intercept = np.polyfit(10*np.log10(1+(f[mask]/f0)**2), y[mask], 1)
+        beta0 = -slope * 2
+        logA0 = 0                     # since A/f**beta -> logA + (-beta) log10 f
+        logC0 = np.min(y)               # start below the noise floor
+
+        p0 = [logA0, beta0, logC0, f0]
+        
+        result = least_squares(
+            residual, p0,
+            bounds=([-0.0001, 0.0,  -80.0, 0],
+                    [ 0.0001, 40.0,  -5.0, 1e-3]),#-5.0]),
+        )
+
+        logA, beta, logC, f0 = result.x
+        A = 10.0 ** (logA/10)
+        C = 10.0 ** (logC/10)
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            model_psd = np.where(F > 0, A / np.power(1 + (F/f0)**2, beta/2) + C, np.nan)
+            detrended_psd = np.where(F > 0, psd_lin_all / model_psd, np.nan)
+
+        if in_db:
+            with np.errstate(divide='ignore', invalid='ignore'):
+                detrended_psd = 10.0 * np.log10(detrended_psd)
+                model_psd = 10.0 * np.log10(model_psd)
+
+        fit_rmse = np.sqrt(np.mean(residual(result.x)**2))
+        return A, beta, C, f0, detrended_psd, model_psd, fit_rmse
+    
     def compute_max_psd_component_f(self, f_bins=np.arange(1e-4, 5e-3, 1e-4),theta_bins=np.deg2rad(np.arange(0, 181, 15))):
             """
             Computes the anisotropy factor f from the 2D PSD DataArray.
@@ -797,6 +897,7 @@ class SARProcessor:
             n_t = len(theta_bins) - 1
 
             max_component           = np.full((n_f, n_t), np.nan)
+            min_component           = np.full((n_f, n_t), np.nan)
             mean_component          = np.full((n_f, n_t), np.nan)
             max_component_coherence = np.full((n_f, n_t), np.nan)
 
@@ -809,10 +910,11 @@ class SARProcessor:
                     coh_bin = coh_values[mask]
 
                     max_component[i, j]  = np.max(psd_bin)
+                    min_component[i, j]  = np.min(psd_bin)
                     mean_component[i, j] = 10*np.log10(np.mean(10**(psd_bin/10)))
                     max_component_coherence[i, j] = psd_bin[np.argmax(coh_bin)]
 
-            return max_component, mean_component, max_component_coherence
+            return max_component, min_component, mean_component, max_component_coherence
 
     def compute_component_significance(self, f_bins=np.arange(1e-4, 5e-3, 1e-4),theta_bins=np.deg2rad(np.arange(0, 181, 15))):
                 """
@@ -963,7 +1065,7 @@ class SARProcessor:
             ky_d = (2 * np.pi * np.fft.fftfreq(ny))[:, None]
             kx_d = (2 * np.pi * np.fft.fftfreq(nx))[None, :]
             k_mag = np.sqrt(kx_d**2 + ky_d**2)
-            k_cutoff = 2 * np.pi / 5000.0    # remove scales larger than 5 km
+            k_cutoff = 2 * np.pi / 20000.0    # remove scales larger than 20 km
             F_detrend *= 1.0 - np.exp(-0.5 * (k_mag / k_cutoff)**2)
             vals = np.real(scipy.fft.ifft2(F_detrend, workers=-1)).astype(np.float32)
 

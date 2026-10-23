@@ -8,6 +8,10 @@ import datetime
 import re
 import numpy as np
 import traceback
+from scipy.signal import find_peaks
+from scipy import ndimage as ndi
+from matplotlib.patches import Ellipse
+from scipy.optimize import minimize
 
 class Database:
 
@@ -72,6 +76,7 @@ class Database:
 
                     # Extract the statistics and add them to the row
                     row['max_component'] = [self.stats['max_component'].values]
+                    row['min_component'] = [self.stats['min_component'].values]
                     row['mean_component'] = [self.stats['mean_component'].values]
                     row['max_component_coherence'] = [self.stats['max_component_coherence'].values]
                     row['anisotropy'] = [self.stats['anisotropy'].values]
@@ -82,9 +87,15 @@ class Database:
                     row['max_significance'] = [self.stats['max_significance'].values]
                     row['mean_significance'] = [self.stats['mean_significance'].values]
                     row['min_significance'] = [self.stats['min_significance'].values]
+                    row['psd_max'] = self.stats['psd_max'].values
+                    row['beta'] = self.stats['beta'].values
+                    row['C'] = self.stats['C'].values
+                    row['f0'] = self.stats['f0'].values
+                    row['amplitude'] = self.stats['amplitude'].values
+                    row['fit_rmse'] = self.stats['fit_rmse'].values
                     
-                    row['f_bins'] = [self.stats['f_bins'].values]
-                    row['theta_bins'] = [self.stats['theta_bins'].values]
+                    row['f_bins'] = [np.squeeze(np.sort(self.stats['f_bins'].values))]
+                    row['theta_bins'] = [np.squeeze(np.sort(self.stats['theta_bins'].values))]
                 except Exception as e:
                     print(f'Could not add statistics')
                     print(f'Error: {type(e).__name__}: {e}')
@@ -101,7 +112,7 @@ class Database:
         # Save the database into a pickle
         self.save_db_to_pickle()
 
-        print(f'Database has been generated at {self.db_path}')
+        print(f'Database has been generated at {self.db_path}',flush=True)
         return db
          
     def get_closest_measurement(self, date_time, datetime_col='TIME'):
@@ -157,58 +168,215 @@ class Database:
 
         return tile
 
-    def structure_identification(self, num_structures = 10):
+    def half_width_1d(self, y, i, units, baseline=None):
+        p = y[i]
+        base = baseline if baseline is not None else y.min()
+        half = (p) - 3
+        li = i
+        while li > 0 and y[li - 1] > half:
+            li -= 1
+        ri = i
+        while ri < len(y) - 1 and y[ri + 1] > half:
+            ri += 1
+        distance = units[ri] - units[li] + 1
+        offset = (units[ri] + units[li])/2 - units[i]
+        return distance, offset
+
+    def gaussian_2d(self, coords, A, mx, my, sx, sy, B):
+        x, y = coords
+        return B + A * np.exp(
+            -((x - mx)**2) / (2 * sx**2)
+            -((y - my)**2) / (2 * sy**2)
+        )
+
+    def fit_peak_mle(self, Z, cx, cy, half_window=15):
+        """Fit a 2D Gaussian to a local window around (cx, cy)."""
+        # 1. Extract window
+        y0, y1 = max(0, cy - half_window), min(Z.shape[0], cy + half_window + 1)
+        x0, x1 = max(0, cx - half_window), min(Z.shape[1], cx + half_window + 1)
+        window = Z[y0:y1, x0:x1].astype(float)
+
+        window = window - np.nanmin(window)
+
+        yy, xx = np.mgrid[y0:y1, x0:x1]
+        coords = (xx.ravel(), yy.ravel())
+        z = window.ravel()
+
+        # 2. Initial guess
+        A0 = window.max() - np.median(window)
+        B0 = np.median(window)
+        sx0 = sy0 = half_window / 3
+        p0 = [A0, cx, cy, sx0, sy0, B0]
+
+        # 3. Bounds (prevent runaway sigma)
+        bounds = [
+            (0, None),                    # A >= 0
+            (x0, x1), (y0, y1),           # centroid within window
+            (0.5, half_window),           # sigma_x
+            (0.5, half_window),           # sigma_y
+            (None, None),                 # background
+        ]
+
+        # 4. Negative log-likelihood (Gaussian noise)
+        def neg_log_likelihood(params):
+            A, mx, my, sx, sy, B = params
+            model = self.gaussian_2d(coords, A, mx, my, sx, sy, B)
+            resid = z - model
+            sigma_n = max(np.std(resid), 1e-6)
+            return 0.5 * np.sum((resid / sigma_n)**2) + len(z) * np.log(sigma_n)
+
+        result = minimize(neg_log_likelihood, p0, bounds=bounds, method="L-BFGS-B")
+
+        A, mx, my, sx, sy, B = result.x
+
+        return {
+            "centroid": (mx, my),
+            "sigma": (abs(sx), abs(sy)),
+            "amplitude": A,
+            "background": B,
+            "success": result.success,
+        }
+
+    def find_peaks_2d_prominence(self,Z,wavelength,theta,prominence=3.0,smooth_sigma=1.0,min_distance=1,pad_width=5,pad_mode="edge"):# 'edge', 'reflect', 'wrap', 'constant'
+        # Z = [wavelength x theta]
+        Zf = Z.astype(float)
+        
+        if smooth_sigma > 0:
+            Zf = ndi.gaussian_filter(Zf, smooth_sigma)
+
+        height, width = Zf.shape
+        theta_og = theta
+        Zf = np.concat([Zf,Zf],axis=1)
+        theta = np.unwrap(np.concat([theta,theta]))
+        # Pad to give every cell a full neighbourhood
+        Zp = np.pad(Zf, pad_width, mode=pad_mode)
+
+        Hp, Wp = Zp.shape
+        mask = np.ones((Hp, Wp), dtype=bool)
+
+        # Row-wise peaks
+        row_peaks = np.zeros((Hp, Wp), dtype=bool)
+        for i in range(Hp):
+            idx, _ = find_peaks(Zp[i, :],
+                                prominence=prominence,
+                                distance=min_distance)
+            row_peaks[i, idx] = True
+
+        # Column-wise peaks
+        col_peaks = np.zeros((Hp, Wp), dtype=bool)
+        for j in range(Wp):
+            idx, _ = find_peaks(Zp[:, j],
+                                prominence=prominence,
+                                distance=min_distance)
+            col_peaks[idx, j] = True
+
+        struct = np.ones((3, 3), dtype=bool)          # 8-connected neighbourhood
+
+        row_peaks_d = ndi.binary_dilation(row_peaks, structure=struct)
+        col_peaks_d = ndi.binary_dilation(col_peaks, structure=struct)
+
+        mask = row_peaks_d & col_peaks_d
+
+        # Crop back to original size
+        mask = mask[pad_width:-pad_width, pad_width:-pad_width]
+
+        # Merge adjacent True pixels into centroids
+        lab, n = ndi.label(mask, structure=np.ones((3, 3), dtype=int))
+        peaks = []
+        for k in range(1, n + 1):
+            wavelength_s, theta_s = np.where(lab == k)
+            imax = np.argmax(Zf[wavelength_s, theta_s])
+            max_wavelength = wavelength_s[imax]
+            max_theta = theta_s[imax]
+            fit_params = self.fit_peak_mle(Zf, max_theta, max_wavelength, half_window=5)
+            wavelength_centroid = fit_params['centroid'][1]
+            theta_centroid = fit_params['centroid'][0] % (width - 1)
+
+            # Get the ellipses idxs
+            wavelength_idx_i = np.max([int(wavelength_centroid - fit_params['sigma'][1]/2),0])
+            wavelength_idx_f = np.min([int(wavelength_centroid + fit_params['sigma'][1]/2),height - 1])
+            theta_idx_i = np.max([int(theta_centroid - fit_params['sigma'][0]/2),0])
+            theta_idx_f = np.min([int(theta_centroid + fit_params['sigma'][0]/2),width - 1])
+
+            wavelength_width = wavelength[wavelength_idx_f]-wavelength[wavelength_idx_i]
+            theta_width = theta_og[theta_idx_f] - theta_og[theta_idx_i] 
+            wavelength_offset = (wavelength[wavelength_idx_f] + wavelength[wavelength_idx_i])/2
+            theta_offset = (theta_og[theta_idx_f] + theta_og[theta_idx_i])/2
+            amplitude = fit_params['amplitude']
+            max_theta = max_theta % width
+            peaks.append((max_wavelength, max_theta, Zf[int(round(max_wavelength)), int(round(max_theta))], wavelength_centroid, theta_centroid, amplitude, wavelength_width, theta_width, wavelength_offset, theta_offset))
+
+        return peaks, mask
+
+    def structure_identification(self):
+
         df = self.db
-        if 'structures' not in df.columns:
-            df['structures'] = None
-        df['structures'] = df['structures'].astype(object)
+        if 'components' not in df.columns:
+            df['components'] = None
+
+        df['components'] = df['components'].astype(object)
         for idx, row in df.iterrows():
             f_bins = row['f_bins']
             theta_bins = row['theta_bins']
+
             wavelengths = 1/f_bins[:-1]
             theta_bins = theta_bins[:-1]
 
-            mean_significance_2d = row['mean_significance']
-            max_significance_2d = row['max_significance']
-            global_mean_significance = np.nanmean(mean_significance_2d, axis=1, keepdims=True)
-            significance_2d = (max_significance_2d-global_mean_significance)
             max_component_coherence = row['max_component_coherence']
             max_component = row['max_component']
             mean_component = row['mean_component']
-            mean_coherence = row['mean_phase_coherence']
+            max_coherence = row['max_phase_coherence']
+            global_mean_component = np.nanmean(mean_component, axis=1, keepdims=True)
+            significance_2d = (mean_component-global_mean_component)
 
-            theta_2d, wavelengths_2d = np.meshgrid(theta_bins,wavelengths)
-            mask = (wavelengths_2d>=1000) & (wavelengths_2d <= 5000)
+            mean_significance_2d = row['mean_significance']
+            max_significance_2d = row['max_significance']
+            
+            global_mean_significance = np.nanmean(mean_significance_2d, axis=1, keepdims=True)
+            significance_2d = (max_significance_2d-global_mean_significance)
+            significance_2d = significance_2d[:-1,:-1]
 
-            max_component_coherence = max_component_coherence[mask]
-            max_component = max_component[mask]
-            significance = significance_2d[mask]
+            peaks, mask = self.find_peaks_2d_prominence(
+                        10**(significance_2d/10),
+                        wavelengths,
+                        theta_bins,
+                        prominence=3.0,          # in dB (or in whatever unit Z is)
+                        smooth_sigma=0.0,        # e.g. 1.0 to denoise first
+                        min_distance=1,          # in pixels, per direction
+                        pad_mode='wrap' # OG edge
+                    )
+            
+            peaks_list = []
+            
+            for peak in peaks:
 
-            internal_wavelengths = wavelengths_2d[mask]
-            internal_theta = theta_2d[mask]
-            components_magnitudes = mean_component[mask]
-            component_coherence = mean_coherence[mask]
-
-
-            most_significant_components = []
-            most_significant_idx = np.argsort(significance, axis=None)[::-1]
-
-            n = 0
-            for component_idx in most_significant_idx:
-                if np.isnan(significance.ravel()[component_idx]):
+                p_theta = int(peak[1])
+                p_wavelength = int(peak[0])
+                centroid_wavelength = int(peak[3])
+                centroid_theta = int(peak[4])
+                v = peak[5]
+                wavelength_width = peak[6]
+                theta_width = peak[7]
+                wavelength_offset = peak[8]
+                theta_offset = peak[9]
+                
+                if v < 3:
                     continue
-
-                component_dict = {'significance':significance.ravel()[component_idx],
-                                'magnitude': components_magnitudes.ravel()[component_idx],
-                                'coherence':component_coherence.ravel()[component_idx],
-                                'wavelength':internal_wavelengths.ravel()[component_idx],
-                                'theta':np.degrees(internal_theta.ravel()[component_idx])}
-                most_significant_components.append(component_dict)
-                n += 1
-                if n >= num_structures - 1:
-                    break
-                    
-            df.at[idx, 'components'] = most_significant_components
+                component_dict = {'significance':v,
+                                'wavelength':wavelengths[centroid_wavelength],
+                                'theta':np.rad2deg(theta_bins[centroid_theta]),
+                                'coherence':max_coherence[centroid_wavelength,centroid_theta],
+                                'mean_magnitude':mean_component[centroid_wavelength,centroid_theta],
+                                'max_magnitude':max_component[centroid_wavelength,centroid_theta],
+                                'wavelength_width':wavelength_width,
+                                'theta_width':theta_width,
+                                'wavelength_offset':wavelength_offset,
+                                'theta_offset':theta_offset,
+                                'amplitude': v
+                                }
+                peaks_list.append(component_dict)
+                
+            df.at[idx, 'components'] = peaks_list
         return df
     
     ######### PLOT FUNCTIONS #########
@@ -237,95 +405,116 @@ class Database:
                 print('Some printing failed')
             print(f'Image saved at {self.images_path}')
 
-    def generate_db_images_structure_analysis(self, images_path):
+    def generate_db_images_structure_analysis(self, idx, images_path=''):
 
         if images_path != '':
             self.images_path = images_path
         else:
             images_path=self.images_path
 
+        row = self.db.loc[[idx]]
         flat = pd.json_normalize(
-            self.db.to_dict("records"),
+            row.to_dict("records"),
             record_path="components",
             meta="filename"   # keep whatever parent id you have; drop if none
         )
-
+        
         df = flat.copy()
         df["short"] = df["filename"]
 
         # Fix color scales across all files so panels are comparable
-        sig_lo, sig_hi = df["significance"].quantile([0.05, 0.95])
-        mag_lo, mag_hi = df["magnitude"].quantile([0.05, 0.95])
-        wl_lo,  wl_hi  = df["wavelength"].quantile([0.0, 1.0])
-        coh_lo, coh_hi = df["coherence"].quantile([0.05, 0.95])
+        sig_lo, sig_hi = [0,20] #df["significance"].quantile([0.05, 0.95])
+        mag_lo, mag_hi = [-20,0] #df["magnitude"].quantile([0.05, 0.95])
+        wl_lo,  wl_hi  = [200,10000] #df["wavelength"].quantile([0.0, 1.0])
+        coh_lo, coh_hi = [0,1.0] #df["coherence"].quantile([0.05, 0.95])
 
-        def plot_file(sub):
-            fname = sub["short"].iloc[0]
-            fig = plt.figure(figsize=(12, 9))
-            fig.suptitle(fname, fontsize=13, y=0.98)
+        fname = df["short"].iloc[0]
+        fig = plt.figure(figsize=(12, 9))
+        fig.suptitle(fname, fontsize=13, y=0.98)
 
-            # ── 1) Polar: wavelength vs theta, color = magnitude ─────────────
-            ax1 = fig.add_subplot(2, 2, 1, projection="polar")
-            sc = ax1.scatter(
-                np.deg2rad(sub["theta"]), sub["wavelength"],
-                c=sub["coherence"], cmap="coolwarm",
-                vmin=coh_lo, vmax=coh_hi,
-                s=sub["significance"]*20, edgecolor="k", linewidth=0.5
-            )
-            ax1.set_theta_zero_location("N")
-            ax1.set_theta_direction(-1)
-            ax1.set_title("wavelength vs theta\n(color=magnitude, size=significance)", fontsize=10)
-            plt.colorbar(sc, ax=ax1, shrink=0.75, pad=0.1)
+        # ── 1) Polar: wavelength vs theta, color = magnitude ─────────────
+        ax1 = fig.add_subplot(2, 2, 1, projection="polar")
+        sc = ax1.scatter(
+            np.deg2rad(df["theta"]), df["wavelength"],
+            c=df["coherence"], cmap="coolwarm",
+            vmin=coh_lo, vmax=coh_hi,
+            s=df["significance"]*8, edgecolor="k", linewidth=0.5
+        )
 
-            # ── 2) significance vs coherence, color = wavelength ─────────────
-            ax2 = fig.add_subplot(2, 2, 2)
-            sc = ax2.scatter(
-                sub["significance"], sub["coherence"],
-                c=sub["wavelength"], cmap="viridis",
-                vmin=wl_lo, vmax=wl_hi,
-                s=80, edgecolor="k"
-            )
-            ax2.set_xlabel("significance")
-            ax2.set_ylabel("coherence")
-            ax2.set_title("significance vs coherence\n(color=wavelength)", fontsize=10)
-            plt.colorbar(sc, ax=ax2, shrink=0.85)
+        for _, peak in df.iterrows():
+            N = 400                                  # number of vertices — you choose
+            t = np.linspace(0, 2 * np.pi, N)
 
-            # ── 3) magnitude vs wavelength, color = theta ────────────────────
-            ax3 = fig.add_subplot(2, 2, 3)
-            sc = ax3.scatter(
-                sub["wavelength"], sub["magnitude"],
-                c=sub["theta"], cmap="twilight",
-                s=80, edgecolor="k"
-            )
-            ax3.set_xlabel("wavelength")
-            ax3.set_ylabel("magnitude")
-            ax3.set_title("magnitude vs wavelength\n(color=theta)", fontsize=10)
-            plt.colorbar(sc, ax=ax3, shrink=0.85, label="theta (°)")
+            theta_c = np.deg2rad(peak["theta"]) + np.deg2rad(peak['theta_offset'])
+            r_c     = peak["wavelength"] + np.deg2rad(peak['wavelength_offset'])
+            a_theta = peak["theta_width"]      / 2   # half-width in radians (or θ units)
+            a_r     = peak["wavelength_width"] / 2   # half-height in r units
 
-            # ── 4) Bar chart: significance per structure, labeled by theta ───
-            ax4 = fig.add_subplot(2, 2, 4)
-            order = sub.sort_values("theta").reset_index(drop=True)
-            labels = [f"{t:.0f}°" for t in order["theta"]]
-            bars = ax4.bar(range(len(order)), order["significance"],
-                        color=plt.cm.viridis(
-                            (order["coherence"] - coh_lo) / (coh_hi - coh_lo + 1e-9)
-                        ),
-                        edgecolor="k")
-            ax4.set_xticks(range(len(order)))
-            ax4.set_xticklabels(labels, rotation=45)
-            ax4.set_xlabel("theta (°)")
-            ax4.set_ylabel("significance")
-            ax4.set_title("significance per structure\n(bar color = coherence)", fontsize=10)
+            theta = theta_c + a_theta * np.cos(t)
+            r     = r_c     + a_r     * np.sin(t)
 
-            plt.tight_layout(rect=[0, 0, 1, 0.96])
-            
-            base = fname[:-3] if fname.endswith('.nc') else fname
-            out_path = os.path.join(images_path, f'{base}_analysis.png')
-            fig.savefig(out_path, dpi=300, bbox_inches='tight')
+            ax1.plot(theta, r, color="red", linewidth=2)
+        ax1.set_theta_zero_location("E")
+        ax1.set_theta_direction(1)
+        ax1.set_rlim(wl_lo,wl_hi)
+        ax1.set_rscale('log')
+        ax1.set_rticks([500, 1000, 2000, 5000])
+        ax1.set_title("wavelength vs theta\n(color=coherence, size=significance)", fontsize=10)
+        plt.colorbar(sc, ax=ax1, shrink=0.75, pad=0.1)
 
-        # ── Loop over every file ─────────────────────────────────────────────
-        for fname, sub in df.groupby("filename"):
-            plot_file(sub)
+        # ── 2) significance vs coherence, color = wavelength ─────────────
+        ax2 = fig.add_subplot(2, 2, 2)
+        sc = ax2.scatter(
+            df["significance"], df["coherence"],
+            c=df["wavelength"], cmap="viridis",
+            vmin=wl_lo, vmax=wl_hi,
+            s=80, edgecolor="k"
+        )
+        ax2.set_xlabel("significance")
+        ax2.set_ylabel("coherence")
+        ax2.set_xlim(sig_lo,sig_hi)
+        ax2.set_ylim(coh_lo,coh_hi)
+        ax2.set_title("significance vs coherence\n(color=wavelength)", fontsize=10)
+        ax2.grid('on')
+        plt.colorbar(sc, ax=ax2, shrink=0.85)
+
+        # ── 3) magnitude vs wavelength, color = theta ────────────────────
+        ax3 = fig.add_subplot(2, 2, 3)
+        sc = ax3.scatter(
+            df["wavelength"], df["mean_magnitude"],
+            c=df["theta"], cmap="twilight",
+            s=80, edgecolor="k"
+        )
+        ax3.set_xlabel("wavelength")
+        ax3.set_ylabel("magnitude")
+        ax3.set_title("magnitude vs wavelength\n(color=theta)", fontsize=10)
+        ax3.set_ylim(mag_lo,mag_hi)
+        ax3.set_xlim(wl_lo,wl_hi)
+        ax3.grid('on')
+        plt.colorbar(sc, ax=ax3, shrink=0.85, label="theta (°)")
+
+        # ── 4) Bar chart: significance per structure, labeled by theta ───
+        ax4 = fig.add_subplot(2, 2, 4)
+        order = df.sort_values("theta").reset_index(drop=True)
+        labels = [f"{t:.0f}°" for t in order["theta"]]
+        bars = ax4.bar(range(len(order)), order["significance"],
+                    color=plt.cm.viridis(
+                        (order["coherence"] - coh_lo) / (coh_hi - coh_lo + 1e-9)
+                    ),
+                    edgecolor="k")
+        ax4.set_xticks(range(len(order)))
+        ax4.set_xticklabels(labels, rotation=45)
+        ax4.set_xlabel("theta (°)")
+        ax4.set_ylabel("significance")
+        ax4.set_ylim(0,sig_hi)
+        ax4.set_title("significance per structure\n(bar color = coherence)", fontsize=10)
+
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        
+        base = fname[:-3] if fname.endswith('.nc') else fname
+        out_path = os.path.join(images_path, f'{base}_structure_analysis.png')
+        fig.savefig(out_path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
 
     def generate_db_images_spectral_analysis(self,product_index,images_path=''):
         
@@ -347,7 +536,9 @@ class Database:
             f_x = self.tile.freq_x.values
             f_y = self.tile.freq_y.values
             phase_coherence = self.tile.phase_coherence.values
+            detrended_psd = self.tile.detrended_psd.values
             max_component_2d = self.tile.max_component.values
+            min_component_2d = self.tile.min_component.values
             mean_component_2d = self.tile.mean_component.values
             max_component_coherence_2d = self.tile.max_component_coherence.values
             anisotropy = self.tile.anisotropy.values
@@ -364,6 +555,7 @@ class Database:
 
             # Convert PSD from dB to linear
             psd = 10.0 ** (psd / 10.0)
+            detrended_psd = 10.0 ** (detrended_psd / 10.0)
 
             # Drop the last frequency bin (MATLAB 1-indexed: f_bins(1:end-1))
             f_bins = f_bins[:-1]
@@ -374,6 +566,7 @@ class Database:
 
             # Subset (numpy uses [row, col] = [y, x])
             psd = psd[np.ix_(idx_y, idx_x)]
+            detrended_psd = detrended_psd[np.ix_(idx_y, idx_x)]
             phase_coherence = phase_coherence[np.ix_(idx_y, idx_x)]
             f_x_sub = f_x[idx_x]
             f_y_sub = f_y[idx_y]
@@ -403,6 +596,7 @@ class Database:
             ##############!!!!!!!!!!!! FER AQUEST FILTRE AMB EL VALOR REAL DE LA POTÈNCIA###############
             sig_2d = (max_component_coherence_2d[:-1,:]-global_mean_component[:-1,:])*max_phase_coherence_2d[:-1,:]
             sig_2d = (max_significance_2d[:-1,:]-global_mean_significance[:-1,:])
+            
             # sig_2d[mask] = 0
             sig_2d_trim = sig_2d                       # (n_f, n_θ)
             sig_full = np.concatenate([sig_2d_trim, sig_2d_trim], axis=1)   # (n_f, 2 n_θ)
@@ -443,6 +637,19 @@ class Database:
             phase_coherence_max = phase_coherence_max_2d[i, idx]   # (n_f,)
 
             # --- Subplot 3: Max component vs wavelength ---
+            
+            ax1 = fig.add_subplot(2, 3, 3)
+            ax1.ticklabel_format(axis='both', style='sci', scilimits=(-3, -3), useMathText=True)
+            psd_db = 10 * np.log10(psd)
+            # pcolormesh expects edges; use centers and shading='auto'
+            mesh1 = ax1.pcolormesh(f_x_sub, f_y_sub, 10*np.log10(detrended_psd), shading='auto')
+            ax1.set_xlabel('f_y [1/m]')
+            ax1.set_ylabel('f_x [1/m]')
+            ax1.set_xlim([-1e-3, 1e-3])
+            ax1.set_ylim([-1e-3, 1e-3])
+            ax1.set_title(fname, fontsize=8)
+            mesh1.set_clim([0,10])
+            fig.colorbar(mesh1, ax=ax1)
             # ax3 = fig.add_subplot(2, 3, 3)
             # wavelength = 1.0 / f_bins
             # ax3.plot(wavelength, max_component)
@@ -573,7 +780,7 @@ class Database:
             out_path = os.path.join(images_path, f'{base}_analysis.png')
             fig.savefig(out_path, dpi=300, bbox_inches='tight')
             plt.close(fig)
-            print(f'Image saved at {out_path}')
+            print(f'Image saved at {out_path}',flush=True)
 
         except Exception as e:
             print(f'Could not process file')
@@ -607,7 +814,7 @@ class Database:
                     self.plot_autocorr(zoom=True,save_image=True,images_path=self.images_path)
             except:
                 print('Some printing failed')
-            print(f'Image saved at {self.images_path}')
+            print(f'Image saved at {self.images_path}',flush=True)
 
     def plot_scene(self, var_name="Sigma0_VV_no_targets", clim_low=0, clim_high=0.1, normalize = True, save_image=False, images_path=''):
         """Plots a spatial map of a specified target variable from the SAR tile
@@ -880,3 +1087,71 @@ class Database:
 
         fitted_profile = WSPD_z1*(altitudes/z1)**alpha
         plt.plot(fitted_profile,altitudes)   
+
+    def structure_identification_old(self, num_structures = 20, wl_lo = 500, wl_hi = 10000, psd_th = -20, coh_th=0, sig_th=3):
+            df = self.db
+    
+            if 'components' not in df.columns:
+                df['components'] = None
+            
+            df['components'] = df['components'].astype(object)
+            for idx, row in df.iterrows():
+                f_bins = row['f_bins']
+                theta_bins = row['theta_bins']
+                wavelengths = 1/f_bins[:-1]
+                theta_bins = theta_bins[:-1]
+    
+                mean_significance_2d = row['mean_significance']
+                max_significance_2d = row['max_significance']
+                
+                global_mean_significance = np.nanmean(mean_significance_2d, axis=1, keepdims=True)
+                significance_2d = (max_significance_2d-global_mean_significance)
+                max_component_coherence = row['max_component_coherence']
+                max_component = row['max_component']
+                mean_component = row['mean_component']
+                global_mean_amplitude = np.nanmean(mean_component, axis=1, keepdims=True)
+                # significance_2d = (max_component-global_mean_amplitude)
+                mean_coherence = row['mean_phase_coherence']
+    
+                theta_2d, wavelengths_2d = np.meshgrid(theta_bins,wavelengths)
+                mask = (wavelengths_2d>=wl_lo) & (wavelengths_2d <= wl_hi) & (mean_component>psd_th) & (mean_coherence>coh_th)
+    
+                max_component_coherence = max_component_coherence[mask]
+                max_component = max_component[mask]
+                
+                significance = significance_2d[mask]
+    
+                internal_wavelengths = wavelengths_2d[mask]
+                internal_theta = theta_2d[mask]
+                components_magnitudes = mean_component[mask]
+                component_coherence = mean_coherence[mask]
+    
+                most_significant_components = []
+                most_significant_idx = np.argsort(significance, axis=None)[::-1]
+    
+                n = 0
+                for component_idx in most_significant_idx:
+                    internal_component_significance = significance.ravel()[component_idx]
+                    internal_component_magnitude = components_magnitudes.ravel()[component_idx]
+                    internal_component_coherence = component_coherence.ravel()[component_idx]
+                    internal_wavelength = internal_wavelengths.ravel()[component_idx]
+                    theta = np.degrees(internal_theta.ravel()[component_idx])
+                    if np.isnan(significance.ravel()[component_idx]):
+                        continue
+    
+                    if significance.ravel()[component_idx]<sig_th:
+                        break
+    
+                    component_dict = {'significance':internal_component_significance,
+                                    'magnitude': internal_component_magnitude,
+                                    'coherence': internal_component_coherence,
+                                    'wavelength': internal_wavelength,
+                                    'theta': theta}
+                    most_significant_components.append(component_dict)
+                    n += 1
+                    if n >= num_structures - 1:
+                        break
+                        
+                df.at[idx, 'components'] = most_significant_components
+            print(f_bins)
+            return df
