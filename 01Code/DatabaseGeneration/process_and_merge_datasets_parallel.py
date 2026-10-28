@@ -24,7 +24,7 @@ height = int(config.height)
 def SAR_worker(file_path, sar_src, sar_dst, lat, lon, width, height):
     # Import inside the clean spawned process
     from SARProcessor import SARProcessor
-
+    
     sp = SARProcessor(
         sar_src_path=sar_src,
         sar_dst_path=sar_dst,
@@ -34,18 +34,16 @@ def SAR_worker(file_path, sar_src, sar_dst, lat, lon, width, height):
         width=width,
         height=height,
     )
-    sp.process_single_sar_file(file_path)
+    sp.process_single_sar_file(file_path,psd=True,statistics=True)
     return file_path
 
 # Define worker for printing DB images
 def DB_worker(idx, db_path, sar_dst, fino_dst_path, images_path):
     # Import inside the clean spawned process
     from Database import Database
-    db = Database(db_path,sar_src_path=sar_dst,fino_src_path=fino_dst_path,images_path=images_path)
+    db = Database(db_path,sar_postprocessed_path=sar_dst,fino_src_path=fino_dst_path,images_path=images_path)
     db.load_db()
     db.generate_db_images_spectral_analysis(idx)
-    db.generate_db_images_structure_analysis()
-    # db.generate_db_images_for_single_product(idx,fft=False,AC=False)
     return idx
 
 # Process all FINO1 data files in fino_src_path and store them in fino_dst_path
@@ -58,24 +56,24 @@ def DB_worker(idx, db_path, sar_dst, fino_dst_path, images_path):
 # sp.process_sar_files()
 
 # 1. Gather all SAR source files
-# sar_files = glob.glob(os.path.join(config.sar_src_path, "*.nc"))
+sar_files = glob.glob(os.path.join(config.sar_src_path, "*.nc"))
 
-# with ProcessPoolExecutor(max_workers=16) as executor:
-#     futures = [
-#         executor.submit(
-#             SAR_worker, f, sar_src, sar_dst, lat, lon, width, height
-#         )
-#         for f in sar_files
-#     ]
+with ProcessPoolExecutor(max_workers=16) as executor:
+    futures = [
+        executor.submit(
+            SAR_worker, f, sar_src, sar_dst, lat, lon, width, height
+        )
+        for f in sar_files
+    ]
 
-#     for future in as_completed(futures):
-#         try:
-#             print(f"Finished: {future.result()}")
-#         except Exception as e:
-#             print(f"Error: {e}")
+    for future in as_completed(futures):
+        try:
+            print(f"Finished: {future.result()}",flush=True)
+        except Exception as e:
+            print(f"Error: {e}")
 
 # Merge datasets by assigning the closes measurement to each SAR measurement and generate a database dataframe
-db = Database.Database(config.db_path,sar_src_path=config.sar_dst_path,sar_statistics_path=config.sar_statistics_path,fino_src_path=config.fino_dst_path,images_path=config.images_path)
+db = Database.Database(config.db_path,sar_postprocessed_path=config.sar_dst_path,sar_statistics_path=config.sar_statistics_path,fino_src_path=config.fino_dst_path,images_path=config.images_path)
 db.merge_datasets()
 db.load_db()
 

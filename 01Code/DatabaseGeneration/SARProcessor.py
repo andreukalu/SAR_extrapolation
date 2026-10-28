@@ -69,15 +69,17 @@ class SARProcessor:
         self.file_path = os.path.join(sar_src_path,sar_file_name)
         self.sar_statistics_path = sar_statistics_path
 
-        # Create SAR dst directory
-        dirname, fname = os.path.split(self.sar_dst_path)
-        if not os.path.isdir(dirname):
-            os.makedirs(dirname)
+        # Create SAR dst directory if passed as input
+        if self.sar_dst_path != '':
+            dirname, fname = os.path.split(self.sar_dst_path)
+            if not os.path.isdir(dirname):
+                os.makedirs(dirname)
 
-        # Create SAR statistics directory
-        dirname, fname = os.path.split(self.sar_statistics_path)
-        if not os.path.isdir(dirname):
-            os.makedirs(dirname)
+        # Create SAR statistics directory if passed as input
+        if self.sar_statistics_path != '':
+            dirname, fname = os.path.split(self.sar_statistics_path)
+            if not os.path.isdir(dirname):
+                os.makedirs(dirname)
 
         # Add target coordinates
         self.lat = lat
@@ -88,12 +90,22 @@ class SARProcessor:
         self.height = height
 
     ############## METHODS ############
-    def process_sar_files(self, psd = True, autocorr = False, wavelet = False):
+    def process_sar_files(self, psd = True, statistics = True, autocorr = False, wavelet = False):
         """
             Process the SAR .nc files within src_path. Tiles at the coordinates of interest with dimensions
             width and height are cutted out from the complete image, thus reducing the dataset weight.
             
             IMPORTANT! this function requires that fino_path is defined and pointing to the FINO1 dataframe
+
+            Params:
+            psd : Bool (optional)
+                Flag for PSD computation through Welch method
+            statistics : Bool (optional)
+                Flag for PSD statistics computation
+            autocorr : Bool (optional)
+                Flag for autocorrelation computation
+            wavelet : Bool (optional)
+                Flat for wavelet transform computation
         """
         print('Processing all SAR files')
         # Get all the available files in src_path
@@ -112,15 +124,16 @@ class SARProcessor:
                 # Filter out objects in the tile such as ships or wind turbines
                 self.filter_objects(num_guard=20, num_ref=20, pfa=1e-3)
 
-                # Compute the 2D PSDs of the tile using the Welch method and periodogram method
-                # self.compute_fft_2D()
-                if psd:
+                if psd: # Compute the 2D PSDs of the tile using the Welch method
                     self.compute_welch_2D(tile_size=(1024, 1024), overlap=0.4, window='hamming', return_db=True)
 
-                if wavelet:
+                if statistics:
+                    self.compute_PSD_statistics(f_bins=np.arange(1e-4, 5e-3, 1e-4),theta_bins=np.deg2rad(np.arange(0, 181, 15)))
+
+                if wavelet: # Compute the Wavelet transform in 2 dimensions
                     self.compute_wavelet_2D()
 
-                if autocorr:
+                if autocorr: # Compute the autocorrelation of the tile 
                     self.compute_autocorr_2D()
 
                 # Delete the dataset containing the whole SAR image and only retain the cutted tile
@@ -128,11 +141,12 @@ class SARProcessor:
                 
                 # Save the processed tile
                 self.write_product(os.path.basename(file).split('.')[0], psd=psd, autocorr=autocorr, wavelet=wavelet)
+
             except Exception as e:
                 print(f'Could not process file {file}')
                 print(f'Error: {type(e).__name__}: {e}')
                 traceback.print_exc()
-                continue   # if inside a loop
+                continue
 
     def process_single_sar_file(self,filename,psd=True,statistics=True,autocorr=False,wavelet=False):
             """
@@ -140,6 +154,16 @@ class SARProcessor:
                 width and height are cutted out from the complete image, thus reducing the dataset weight.
                 
                 IMPORTANT! this function requires that fino_path is defined and pointing to the FINO1 dataframe
+
+                Params:
+                filename : String
+                    Filename of the file SAR file to be processed
+                psd : Bool (optional)
+                    Flag for PSD computation through Welch method
+                autocorr : Bool (optional)
+                    Flag for autocorrelation computation
+                wavelet : Bool (optional)
+                    Flat for wavelet transform computation
             """
     
             # Get all the available files in src_path
@@ -157,25 +181,51 @@ class SARProcessor:
                 # Filter out objects in the tile such as ships or wind turbines
                 self.filter_objects(num_guard=20, num_ref=20, pfa=1e-3)
 
-                # Compute the 2D PSDs of the tile using the Welch method and periodogram method
-                # self.compute_welch_2D(tile_size=(128, 128), overlap=0.5, window='hamming', return_db=True)
-                if psd:
+                if psd: # Compute the 2D PSD of the tile using the Welch method
                     self.compute_welch_2D(tile_size=(1024, 1024), overlap=0.4, window='hamming', return_db=True)
-                
-                if wavelet:
+
+                if statistics: # Compute the PSD statistics
+                    
+                    if psd == False: # If PSD is not to be computed, try to obtain the already processed PSD
+                        self.read_single_sar_postprocessed_file(os.path.basename(file).split('.')[0] + '.nc')
+                    self.compute_PSD_statistics(f_bins=np.arange(1e-4, 5e-3, 1e-4),theta_bins=np.deg2rad(np.arange(0, 181, 15)))
+
+                if wavelet: # Compute the wavelet transform of the tile
                     self.compute_wavelet_2D()
 
-                if autocorr:
+                if autocorr: # Compute the autocorrelation of the tile
                     self.compute_autocorr_2D()
+
                 # Delete the dataset containing the whole SAR image and only retain the cutted tile
                 del self.ds
 
                 # Save the processed tile
                 self.write_product(os.path.basename(file).split('.')[0], psd=psd, statistics=statistics,autocorr=autocorr, wavelet=wavelet)
+            
             except Exception as e:
                 print(f'Could not process file {file}')
                 print(f'Error: {type(e).__name__}: {e}')
                 traceback.print_exc()
+
+    def read_single_sar_postprocessed_file(self,filename):
+        """
+        Function to load the tile of an already processed SAR file.
+
+        Params:
+            filename : String
+                SAR product filename
+        """
+
+        # Get the SAR postprocessed files path
+        path = os.path.join(self.sar_dst_path,filename)
+
+        # Load the product
+        tile = xr.open_dataset(path)
+        self.tile = tile
+        self.psd = self.tile['psd']
+        self.psd_max = self.tile['psd_max']
+        self.power = self.tile['power']
+        self.phase_coherence = self.tile['phase_coherence']
 
     def print_info(self):
             """
@@ -201,45 +251,34 @@ class SARProcessor:
         Params:
         filename : String
             File name of the pickle to be saved.
+        psd : Bool (optional)
+            Flag for the addition of PSD product information into the product written
+        statistics : Bool (optional)
+            Flag for the addition of PSD 2nd order statistics products into the product written
+        autocorr : Bool (optional)
+            Flag for the addition of autocorrelation product information into the product written
+        wavelet : Bool (optional)
+            Flag for the addition of the wavelet transform information into the product written
         """
 
         # Create the pickles paths
+        # If the psd, autocorrelation or wavelet are to be added, create the sar_dst_path
         if psd == True or autocorr == True or wavelet == True:
             full_path = os.path.join(self.sar_dst_path,filename+'.nc')
 
+        # If the 2nd order statistics are to be saved, create a separate pickle path for it
         if statistics == True:
             statistics_path = os.path.join(self.sar_statistics_path,filename+'_statistics.nc')
 
+        # Obtain the SAR measured tile as the base dataset.
         self.stats = self.tile
 
         # Add psd to the tile
         if psd:
             self.tile['psd'] = self.psd
             self.tile['psd_max'] = self.psd_max
+            self.tile['power'] = self.power
             self.tile['phase_coherence'] = self.phase_coherence
-            self.tile['max_component'] = (('freq', 'theta'), self.max_component)
-            self.tile['min_component'] = (('freq', 'theta'), self.min_component)
-            self.tile['mean_component'] = (('freq', 'theta'), self.mean_component)
-            self.tile['max_component_coherence'] = (('freq', 'theta'), self.max_component_coherence)
-            self.tile['anisotropy'] = self.anisotropy
-            self.tile['phase_coherence_max'] = (('freq', 'theta'), self.phase_coherence_max)
-            self.tile['max_phase_coherence'] = (('freq', 'theta'), self.max_phase_coherence)
-            self.tile['min_phase_coherence'] = (('freq', 'theta'), self.min_phase_coherence)
-            self.tile['mean_phase_coherence'] = (('freq', 'theta'), self.mean_phase_coherence)
-            self.tile['max_significance'] = (('freq', 'theta'), self.max_significance)
-            self.tile['mean_significance'] = (('freq', 'theta'), self.mean_significance)
-            self.tile['min_significance'] = (('freq', 'theta'), self.min_significance)
-            self.tile['beta'] = self.beta
-            self.tile['amplitude'] = self.amplitude
-            self.tile['C'] = self.C
-            self.tile['f0'] = self.f0
-            self.tile['detrended_psd'] = (('freq_x', 'freq_y'), self.detrended_psd)
-            self.tile['model_psd'] = (('freq_x', 'freq_y'), self.model_psd)
-            self.tile['fit_rmse'] = self.fit_rmse
-            self.stats['f_bins'] = self.f_bins
-            
-            self.tile['f_bins'] = self.f_bins
-            self.tile['theta_bins'] = self.theta_bins
 
         if statistics:
             self.tile['phase_coherence'] = self.phase_coherence
@@ -256,10 +295,10 @@ class SARProcessor:
             self.tile['mean_significance'] = (('freq', 'theta'), self.mean_significance)
             self.tile['min_significance'] = (('freq', 'theta'), self.min_significance)
             self.tile['psd_max'] = self.psd_max
-            self.tile['beta'] = self.beta
-            self.tile['amplitude'] = self.amplitude
-            self.tile['C'] = self.C
-            self.tile['f0'] = self.f0
+            self.tile['A'] = self.A
+            self.tile['an1'] = self.an1
+            self.tile['f01'] = self.f01
+            self.tile['f02'] = self.f02
             self.tile['detrended_psd'] = (('freq_x', 'freq_y'), self.detrended_psd)
             self.tile['model_psd'] = (('freq_x', 'freq_y'), self.model_psd)
             self.tile['fit_rmse'] = self.fit_rmse
@@ -629,7 +668,7 @@ class SARProcessor:
             return fft_da
     
 
-    def compute_welch_2D(self, var_name='Sigma0_VV_no_targets', spatial_dims=('y', 'x'), tile_size=(256, 256), overlap=0.5, window='hanning', return_db=True, normalize=True, f_bins=np.arange(1e-4, 5e-3, 1e-4),theta_bins=np.deg2rad(np.arange(0, 181, 15))):
+    def compute_welch_2D(self, var_name='Sigma0_VV_no_targets', tile_size=(256, 256), overlap=0.5, window='hanning', return_db=True, normalize=True):
         """
         Computes 2D Welch Power Spectral Density (PSD) on an xarray DataArray 
         and returns a DataArray with centered spatial frequency axes (cycles per unit) using the Welch method.
@@ -652,28 +691,24 @@ class SARProcessor:
         xr.DataArray
             2D Welch PSD with centered frequency coordinates (freq_y, freq_x).
         """
-        dim_y, dim_x = spatial_dims
         
-        # 1. Fill NaNs with mean to prevent FFT corruption
+        #Fill NaNs with mean to prevent FFT corruption
         da_filled = self.tile[var_name].fillna(self.tile[var_name].mean().item()) - np.mean(self.tile[var_name].fillna(self.tile[var_name].mean().item()))
         arr = da_filled.values.astype(np.float64)
-        
+
+        # Get the tile dimensions
         ny, nx = arr.shape
         ty, tx = tile_size
-
-        # 2. Extract spatial resolution (dx, dy) from coordinate vectors
-        dy = np.abs(np.diff(self.tile[dim_y].values)[0])
-        dx = np.abs(np.diff(self.tile[dim_x].values)[0])
         
-        # Assumed values
+        # Extract spatial resolution (dx, dy) from coordinate vectors
         dy = self.tile.metadata.attrs['Abstracted_Metadata:azimuth_spacing']
         dx = self.tile.metadata.attrs['Abstracted_Metadata:range_spacing']
 
-        # 3. Calculate step sizes based on overlap percentage
+        # Calculate step sizes based on overlap percentage
         step_y = max(1, int(ty * (1.0 - overlap)))
         step_x = max(1, int(tx * (1.0 - overlap)))
 
-        # 4. Construct 2D tapering window and energy normalization factor
+        # Construct 2D tapering window and energy normalization factor
         if window == 'hanning':
             win_2d = np.outer(np.hanning(ty), np.hanning(tx))
         elif window == 'hamming':
@@ -683,19 +718,23 @@ class SARProcessor:
             
         win_norm = np.sum(win_2d**2) * (dx * dy)  # Physical scale normalization
 
-        # 5. Tile iteration and 2D FFT averaging
+        # Tile iteration and 2D FFT averaging
         psd_accumulator = np.zeros((ty, tx), dtype=np.float64)
-        tile_count = 0
 
         # Preallocate phase array
         phi2_accumulator = np.zeros((ty, tx), dtype=np.complex128)
+
+        # Start with tile 0
+        tile_count = 0
+
+        # Iterate over all the tiles
         for y in range(0, ny - ty + 1, step_y):
             for x in range(0, nx - tx + 1, step_x):
+
+                # Select the tile to be analyzed
                 tile = arr[y:y+ty, x:x+tx]
                 
-                # Remove DC offset per tile
-                # tile_detrend = detrend(detrend(tile, axis=0, type='linear'),
-                #        axis=1, type='linear')
+                # Remove DC offset per tile through a least squares fitting of a plane and its subtraction
                 yy, xx = np.mgrid[0:ty, 0:tx]
                 A = np.column_stack([np.ones(ty*tx), yy.ravel(), xx.ravel()])
                 coeffs, *_ = np.linalg.lstsq(A, tile.ravel(), rcond=None)
@@ -705,31 +744,39 @@ class SARProcessor:
                 # Apply 2D spatial window
                 tile_windowed = tile_detrend * win_2d
                 
-                # 2D FFT & Power calculation
+                # 2D FFT, Power spectral density, and phase coherence calculation
                 fft2_tile = np.fft.fft2(tile_windowed)
+                # Get the tiles centers
                 yc = y + ty / 2
                 xc = x + tx / 2
+                # Get the phase of the tile PSD and subtract the phase ramp
                 phi2_tile = np.angle(fft2_tile) + 2*np.pi*(np.fft.fftfreq(ty)[:, None] * yc + np.fft.fftfreq(tx)[None, :] * xc)
+                # Obtain the power of the tile
                 power_tile = (np.abs(fft2_tile)**2) / win_norm
-                
+
+                # Accumulate the power and the phase
                 psd_accumulator += power_tile
                 phi2_accumulator += np.exp(1j * phi2_tile)
+
+                # Update the tile
                 tile_count += 1
 
         if tile_count == 0:
             raise ValueError(f"Tile size {tile_size} is larger than input array shape ({ny}, {nx})!")
 
-        # 6. Average across tiles and shift zero-frequency (DC) component to center
+        # Average across tiles and shift zero-frequency (DC) component to center
         psd_avg = psd_accumulator / tile_count
         phase_coherence = np.abs(phi2_accumulator / tile_count)
         psd_shifted = np.fft.fftshift(psd_avg)
         phase_coherence_shifted = np.fft.fftshift(phase_coherence)
 
-        if normalize:
+        if normalize: # If normalize flag True, normalize the PSD and save the max
             self.psd_max = np.max(psd_shifted)
+            self.power = np.sum(psd_shifted)
             psd_shifted = psd_shifted/np.max(psd_shifted)
-        else:
+        else: # If normalize flag False, set the psd_max output to nan
             self.psd_max = np.nan
+            self.power = np.sum(psd_shifted)
 
         # Convert to dB scale if requested
         if return_db:
@@ -741,11 +788,11 @@ class SARProcessor:
             var_name = 'welch_psd'
             unit_label = f"({self.tile.attrs.get('units', 'intensity')})^2 m^2"
 
-        # 7. Calculate centered frequency axes (cycles per spatial unit)
+        # Calculate centered frequency axes (cycles per spatial unit)
         freq_y = np.fft.fftshift(np.fft.fftfreq(ty, d=dy))
         freq_x = np.fft.fftshift(np.fft.fftfreq(tx, d=dx))
 
-        # 8. Build xarray.DataArray
+        # Build xarray.DataArray for the PSD
         psd_da = xr.DataArray(
             psd_output,
             coords={'freq_y': freq_y, 'freq_x': freq_x},
@@ -753,6 +800,7 @@ class SARProcessor:
             name=var_name
         )
 
+        # Build xarray.DataArray for the phase coherence
         phase_coherence_da = xr.DataArray(
             phase_coherence_shifted,
             coords={'freq_y': freq_y, 'freq_x': freq_x},
@@ -760,15 +808,6 @@ class SARProcessor:
             name=var_name
         )
         
-        self.phase_coherence = phase_coherence_da
-        self.psd = psd_da
-
-        max_component, min_component, mean_component, max_component_coherence = self.compute_max_psd_component_f(f_bins,theta_bins)
-        anisotropy = self.compute_anisotropy_f(f_bins)
-        phase_coherence_max, max_phase_coherence, min_phase_coherence, mean_phase_coherence = self.compute_phase_coherence_f(f_bins,theta_bins)
-        max_significance, mean_significance, min_significance = self.compute_component_significance(f_bins,theta_bins)
-        amplitude, beta, C, f0, detrended_psd, model_psd, fit_rmse = self.fit_psd_trend()
-
         # Preserve metadata attributes
         psd_da.attrs['units'] = unit_label
         psd_da.freq_y.attrs['units'] = '1/m'
@@ -776,9 +815,23 @@ class SARProcessor:
         psd_da.attrs['tile_size'] = f"{ty}x{tx}"
         psd_da.attrs['overlap'] = f"{int(overlap*100)}%"
         psd_da.attrs['num_tiles_averaged'] = tile_count
-        
-        self.psd = psd_da
+
+        # Set the processed information as class attributes
         self.phase_coherence = phase_coherence_da
+        self.psd = psd_da
+        
+        return psd_da
+
+    def compute_PSD_statistics(self, f_bins=np.arange(1e-4, 5e-3, 1e-4),theta_bins=np.deg2rad(np.arange(0, 181, 15))):
+        
+        # Compute the statistics of the PSD
+        max_component, min_component, mean_component, max_component_coherence = self.compute_max_psd_component_f(f_bins,theta_bins)
+        anisotropy = self.compute_anisotropy_f(f_bins)
+        phase_coherence_max, max_phase_coherence, min_phase_coherence, mean_phase_coherence = self.compute_phase_coherence_f(f_bins,theta_bins)
+        max_significance, mean_significance, min_significance = self.compute_component_significance(f_bins,theta_bins)
+        A, an1, f01, f02, detrended_psd, model_psd, fit_rmse = self.fit_psd_trend()
+        
+        # Set the processed information as class attributes
         self.max_component = max_component
         self.min_component = min_component
         self.mean_component = mean_component
@@ -791,28 +844,44 @@ class SARProcessor:
         self.max_significance = max_significance
         self.mean_significance = mean_significance
         self.min_significance = min_significance
-        self.beta = beta
-        self.amplitude = amplitude
-        self.C = C
-        self.f0 = f0
+        self.A = A
+        self.an1 = an1
+        self.f01 = f01
+        self.f02 = f02
         self.detrended_psd = detrended_psd
         self.model_psd = model_psd
         self.fit_rmse = fit_rmse
         self.f_bins = f_bins
         self.theta_bins = theta_bins
-        
-        return psd_da
 
     def fit_psd_trend(self, f_lim = 1e-2, in_db=True):
+        """
+        Function to fit a model to the 2D PSD. A Bode-type function is fitted with a pole and a zero.
+        The function is of the shape H(f) = A * ((f ** 2 + f01 ** 2)/(f ** 2 + f02 ** 2)) ** an1
+        In log space, A is the noise level, f01 and f02 are the frequencies of the poles and zeros, 
+        and an1 is the slope
+
+        Params:
+            f_lim : float
+                Frequency limit of the fitting
+            in_db : Bool
+                Flag for indicating if the input PSD is in dBs 
+        """ 
+
+        # Get the frequency values and generate a 2D meshgrid
         fx = self.psd['freq_x'].values
         fy = self.psd['freq_y'].values
         FX, FY = np.meshgrid(fx, fy, indexing='xy')
+
+        # Compute the radial frequency as the quadratic sum of f_x and f_y
         F = np.hypot(FX, FY)
 
+        # Get the psd and phase coherence values from the class attributes
         psd = self.psd.values
         coh = self.phase_coherence.values
-        mask = F <= f_lim
 
+        # Mask out the PSD, F and phase coherence values at frequencies <= f_lim
+        mask = F <= f_lim
         psd_fit = psd[mask]
         F_fit = F[mask]
 
@@ -828,39 +897,38 @@ class SARProcessor:
         f = F_fit[good].ravel()
         y = 10*np.log10(psd_lin_fit[good].ravel())     # log10 of measured power
 
-        # model: log(A) + sum(a_n log(x + c_n))
-        # parametrize C >= 0 via softplus, A > 0 via exp, beta free-ish
+        # Define the model function in dBs
         def residual(p):
-            logA, an1, an2, f01, f02 = p
-            A = 10.0 ** (logA / 10)
-            C = 10.0 ** (logC / 10)
-            A = 1-C
-            model = 10*np.log10(A / (1 + (f/f0) ** 2)**(beta/2) + C)
+            A, an1, f01, f02 = p
+            model = 10*(np.log10(A) + an1*np.log10(f**2+f01**2) + (-an1)*np.log10(f**2+f02**2))
             return model - y
 
-        f0_0 = 1e-3
-        mask = f < f0_0
-        # initial guess from the plain power-law fit (C small)
-        f0 = 2e-4
-        slope, intercept = np.polyfit(10*np.log10(1+(f[mask]/f0)**2), y[mask], 1)
-        beta0 = -slope * 2
-        logA0 = 0                     # since A/f**beta -> logA + (-beta) log10 f
-        logC0 = np.min(y)               # start below the noise floor
+        # initial guess for fitting params
+        f01 = 1e-5
+        f02 = 1e-3
+        an1_0 = -2
+        A0 = np.min(10**(y/10.0))
+        p0 = [A0, an1_0, f01, f02]
 
-        p0 = [logA0, beta0, logC0, f0]
-        
+        # Fitting bounds definition
+        bounds = ([0.0, -10.0, 0, 0],
+                    [ 50.0, 0.0, 1e-2, 1e-2])
+
+        # Fitting of the model to the PSD through least squares
         result = least_squares(
             residual, p0,
-            bounds=([-0.0001, 0.0,  -80.0, 0],
-                    [ 0.0001, 40.0,  -5.0, 1e-3]),#-5.0]),
+            bounds=bounds,
         )
 
-        logA, beta, logC, f0 = result.x
-        A = 10.0 ** (logA/10)
-        C = 10.0 ** (logC/10)
+        # Save the fitting RMSE
+        fit_rmse = np.sqrt(np.mean(residual(result.x)**2))
 
+        # Save the fitting result variables
+        A, an1, f01, f02 = result.x
+
+        # Obtain the modelled psd and detrended psd
         with np.errstate(divide='ignore', invalid='ignore'):
-            model_psd = np.where(F > 0, A / np.power(1 + (F/f0)**2, beta/2) + C, np.nan)
+            model_psd = np.where(F > 0, A*(F**2+f01**2)**an1 * (F**2+f02**2)**(-an1), np.nan)
             detrended_psd = np.where(F > 0, psd_lin_all / model_psd, np.nan)
 
         if in_db:
@@ -868,122 +936,174 @@ class SARProcessor:
                 detrended_psd = 10.0 * np.log10(detrended_psd)
                 model_psd = 10.0 * np.log10(model_psd)
 
-        fit_rmse = np.sqrt(np.mean(residual(result.x)**2))
-        return A, beta, C, f0, detrended_psd, model_psd, fit_rmse
+        return A, an1, f01, f02, detrended_psd, model_psd, fit_rmse
     
     def compute_max_psd_component_f(self, f_bins=np.arange(1e-4, 5e-3, 1e-4),theta_bins=np.deg2rad(np.arange(0, 181, 15))):
             """
-            Computes the anisotropy factor f from the 2D PSD DataArray.
+            Obtains binned PSD statistics in bins of frequency and polar angle theta.
     
             Params:
-            psd_da : xr.DataArray
-                2D Power Spectral Density DataArray with dimensions ('freq_y', 'freq_x').
+            f_bins : np.Array
+                Frequency bins
+            theta_bins : np.Array
+                Theta bins
+            in_db : Bool
+                Flag indicating if the input is in dBs
     
             Returns:
-            anisotropy : float
-                Anisotropy vector, defined as the ratio of the maximum to minimum PSD values for each frequency.
+            max_component : float
+                Maximum PSD component for each bin
+            min_component : float
+                Minimum PSD component for each bin
+            mean_component : float
+                Mean PSD component for each bin
+            max_component_coherence : float
+                PSD component with the max coherence
             """
+
+            # Get fx and fy and compute the 2D meshgrid
             fx = self.psd['freq_x'].values
             fy = self.psd['freq_y'].values
             FX, FY = np.meshgrid(fx, fy, indexing='xy')
 
+            # Compute the radial frequency and the polar angle
             F = np.sqrt(FX**2 + FY**2)
             THETA = np.mod(np.arctan2(FY, FX), np.pi)   # symmetry: [0, pi)
-            
+
+            # Get the PSD and phase coherence values
             psd_values = self.psd.values
             coh_values = self.phase_coherence.values
 
+            # Get the number of bins
             n_f = len(f_bins) - 1
             n_t = len(theta_bins) - 1
 
+            # Preallocate the output variables
             max_component           = np.full((n_f, n_t), np.nan)
             min_component           = np.full((n_f, n_t), np.nan)
             mean_component          = np.full((n_f, n_t), np.nan)
             max_component_coherence = np.full((n_f, n_t), np.nan)
 
+            # For each frequency and theta bin
             for i, (f_min, f_max) in enumerate(zip(f_bins[:-1], f_bins[1:])):
                 for j, (t_min, t_max) in enumerate(zip(theta_bins[:-1], theta_bins[1:])):
+
+                    # Get the bin mask
                     mask = (F >= f_min) & (F < f_max) & (THETA >= t_min) & (THETA < t_max)
                     if not np.any(mask):
                         continue
+
+                    # Mask the PSD and phase coherence bins
                     psd_bin = psd_values[mask]
                     coh_bin = coh_values[mask]
 
-                    max_component[i, j]  = np.max(psd_bin)
-                    min_component[i, j]  = np.min(psd_bin)
-                    mean_component[i, j] = 10*np.log10(np.mean(10**(psd_bin/10)))
-                    max_component_coherence[i, j] = psd_bin[np.argmax(coh_bin)]
+                    # Compute the output statistics
+                    max_component[i, j]  = np.max(psd_bin)                          # Bin max PSD
+                    min_component[i, j]  = np.min(psd_bin)                          # Bin min PSD
+                    mean_component[i, j] = 10*np.log10(np.mean(10**(psd_bin/10)))   # Bin mean PSD
+                    max_component_coherence[i, j] = psd_bin[np.argmax(coh_bin)]     # Bin max phase coherence PSD value
 
             return max_component, min_component, mean_component, max_component_coherence
 
-    def compute_component_significance(self, f_bins=np.arange(1e-4, 5e-3, 1e-4),theta_bins=np.deg2rad(np.arange(0, 181, 15))):
-                """
-                Computes the anisotropy factor f from the 2D PSD DataArray.
-        
-                Params:
-                psd_da : xr.DataArray
-                    2D Power Spectral Density DataArray with dimensions ('freq_y', 'freq_x').
-        
-                Returns:
-                anisotropy : float
-                    Anisotropy vector, defined as the ratio of the maximum to minimum PSD values for each frequency.
-                """
-                fx = self.psd['freq_x'].values
-                fy = self.psd['freq_y'].values
-                FX, FY = np.meshgrid(fx, fy, indexing='xy')
-    
-                F = np.sqrt(FX**2 + FY**2)
-                THETA = np.mod(np.arctan2(FY, FX), np.pi)   # symmetry: [0, pi)
-                
-                psd_values = 10**(self.psd.values/10)
-                coh_values = self.phase_coherence.values
+    def compute_component_significance(self, f_bins=np.arange(1e-4, 5e-3, 1e-4),theta_bins=np.deg2rad(np.arange(0, 181, 15)), in_db=True):
+        """
+        Computes the component significance in bins of f_bins and theta_bins.
+        Component significance is defined as the product of PSD and phase coherence
 
-                significance = 10*np.log10(psd_values*coh_values)
-                
-                n_f = len(f_bins) - 1
-                n_t = len(theta_bins) - 1
+        Params:
+        f_bins : np.Array
+            Frequency bins
+        theta_bins : np.Array
+            Theta bins
+        in_db : Bool
+            Flag indicating if the input is in dBs
+
+        Returns:
+        max_significance : float
+            Max significance per analyzed bin
+        mean_significance : float
+            Mean significance per analyzed bin
+        min_significanceropy : float
+            Min significance per analyzed bin
+        """
+
+        # Get the fx, fy values and generate a meshgrid
+        fx = self.psd['freq_x'].values
+        fy = self.psd['freq_y'].values
+        FX, FY = np.meshgrid(fx, fy, indexing='xy')
+
+        # Get the radial frequency as the quadratic sum of fx and fy
+        F = np.sqrt(FX**2 + FY**2)
+        # Get the polar angle from the arctan of fx and fy
+        THETA = np.mod(np.arctan2(FY, FX), np.pi)   # symmetry: [0, pi)
+
+        # Convert the PSD values to linear and get the phase coherence
+        if in_db:
+            psd_values = 10**(self.psd.values/10)
+        coh_values = self.phase_coherence.values
+
+        # Compute the significance as the product of the PSD and phase coherence
+        significance = 10*np.log10(psd_values*coh_values)
+
+        # Get the number of f and theta bins
+        n_f = len(f_bins) - 1
+        n_t = len(theta_bins) - 1
+
+        # Preallocate the output arrays
+        max_significance    = np.full((n_f, n_t), np.nan)
+        mean_significance   = np.full((n_f, n_t), np.nan)
+        min_significance    = np.full((n_f, n_t), np.nan)
+
+        # For each frequency and theta bins
+        for i, (f_min, f_max) in enumerate(zip(f_bins[:-1], f_bins[1:])):
+            for j, (t_min, t_max) in enumerate(zip(theta_bins[:-1], theta_bins[1:])):
+
+                # Get the mask of the frequency and theta bin
+                mask = (F >= f_min) & (F < f_max) & (THETA >= t_min) & (THETA < t_max)
+                if not np.any(mask):
+                    continue
+
+                # Mask the selected bin
+                significance_bin = significance[mask]
+
+                # Comput the output significance statistics
+                max_significance[i, j]  = np.nanmax(significance_bin)
+                mean_significance[i, j] = np.nanmean(significance_bin)
+                min_significance[i, j] = np.nanmin(significance_bin)
+
+        return max_significance, mean_significance, min_significance
     
-                max_significance    = np.full((n_f, n_t), np.nan)
-                mean_significance   = np.full((n_f, n_t), np.nan)
-                min_significance    = np.full((n_f, n_t), np.nan)
-    
-                for i, (f_min, f_max) in enumerate(zip(f_bins[:-1], f_bins[1:])):
-                    for j, (t_min, t_max) in enumerate(zip(theta_bins[:-1], theta_bins[1:])):
-                        mask = (F >= f_min) & (F < f_max) & (THETA >= t_min) & (THETA < t_max)
-                        if not np.any(mask):
-                            continue
-                        significance_bin = significance[mask]
-    
-                        max_significance[i, j]  = np.nanmax(significance_bin)
-                        mean_significance[i, j] = np.nanmean(significance_bin)
-                        min_significance[i, j] = np.nanmin(significance_bin)
-    
-                return max_significance, mean_significance, min_significance
-    
-    def compute_anisotropy_f(self, f_bins=np.arange(1e-4, 5e-3, 1e-4)):
+    def compute_anisotropy_f(self, f_bins=np.arange(1e-4, 5e-3, 1e-4), in_db = True):
         """
         Computes the anisotropy factor f from the 2D PSD DataArray.
 
         Params:
-        psd_da : xr.DataArray
-            2D Power Spectral Density DataArray with dimensions ('freq_y', 'freq_x').
+        f_bins : np.Array
+            Frequency bins
+        in_db : Bool
+            Flag indicating if the input is in dBs
 
         Returns:
         anisotropy : float
             Anisotropy vector, defined as the ratio of the maximum to minimum PSD values for each frequency.
         """
+        # Get the radial frequency as the quadratic sum of fx and fy
         f = np.sqrt(self.psd['freq_x']**2 + self.psd['freq_y']**2)
+
+        # Get the PSD values
         psd_values = self.psd.values
+        if in_db:
+            psd_values = 10 ** (psd_values / 10)
 
         # Bin the PSD values based on the radial frequency
         anisotropy = np.zeros_like(f_bins[:-1])
         for i, (f_min, f_max) in enumerate(zip(f_bins[:-1], f_bins[1:])):
+            # Get the bin mask and mask the PSD for that bin
             mask = (f >= f_min) & (f < f_max)
             psd_bin = psd_values[mask]
-            psd_bin = 10 ** (psd_bin / 10)  # Convert from dB to linear scale
+
+            # Compute the anisotropy if the bin is not empty
             if len(psd_bin) > 0:
-                anisotropy[i] = (np.max(psd_bin) - np.min(psd_bin)) / (np.max(psd_bin) + np.min(psd_bin))
-                anisotropy[i] = (np.max(psd_bin)) / (np.median(psd_bin))
                 anisotropy[i] = (np.std(psd_bin)) / (np.mean(psd_bin))
 
         return anisotropy
@@ -994,8 +1114,13 @@ class SARProcessor:
         """
         Computes phase-coherence statistics per (radial frequency, angle) bin.
 
+        Params:
+            f_bins : np.Array
+                Frequency bins
+            theta_bins : np.Array
+                Theta bins
+
         Returns
-        -------
         phase_coherence_max  : ndarray (n_f, n_theta)
             Phase coherence at the location of maximum PSD in the bin.
         max_phase_coherence  : ndarray (n_f, n_theta)
@@ -1005,38 +1130,48 @@ class SARProcessor:
         mean_phase_coherence : ndarray (n_f, n_theta)
             Mean phase coherence in the bin.
         """
+        # Get the fx and fy frequencies and obtain a meshgrid
         fx = self.psd['freq_x'].values
         fy = self.psd['freq_y'].values
         FX, FY = np.meshgrid(fx, fy, indexing='xy')
 
+        # Get the radial frequency and polar angle theta
         F = np.sqrt(FX**2 + FY**2)
         THETA = np.mod(np.arctan2(FY, FX), np.pi)
 
+        # Get the PSD and phase coherence values
         psd_values = self.psd.values
         coh_values = self.phase_coherence.values
 
+        # Get the number of bins
         n_f = len(f_bins) - 1
         n_t = len(theta_bins) - 1
 
+        # Preallocate the memory for the output variables
         phase_coherence_max  = np.full((n_f, n_t), np.nan)
         max_phase_coherence  = np.full((n_f, n_t), np.nan)
         min_phase_coherence  = np.full((n_f, n_t), np.nan)
         mean_phase_coherence = np.full((n_f, n_t), np.nan)
 
+        # For every frequency and theta bin
         for i, (f_min, f_max) in enumerate(zip(f_bins[:-1], f_bins[1:])):
             for j, (t_min, t_max) in enumerate(zip(theta_bins[:-1], theta_bins[1:])):
+
+                # Get the bin mask
                 mask = (F >= f_min) & (F < f_max) & (THETA >= t_min) & (THETA < t_max)
                 if not np.any(mask):
                     continue
 
+                # Mask the bin PSD and phase coherence
                 psd_bin = psd_values[mask]
                 coh_bin = coh_values[mask]
 
-                psd_max_idx = np.argmax(psd_bin)
-                phase_coherence_max[i, j]  = coh_bin[psd_max_idx]
-                max_phase_coherence[i, j]  = np.max(coh_bin)
-                min_phase_coherence[i, j]  = np.min(coh_bin)
-                mean_phase_coherence[i, j] = np.mean(coh_bin)
+                # Compute the output statistics
+                psd_max_idx = np.argmax(psd_bin)                    # Get the bin max PSD values
+                phase_coherence_max[i, j]  = coh_bin[psd_max_idx]   # Coherence of the max PSD values
+                max_phase_coherence[i, j]  = np.max(coh_bin)        # Max coherence of the bin
+                min_phase_coherence[i, j]  = np.min(coh_bin)        # Min coherence of the bin
+                mean_phase_coherence[i, j] = np.mean(coh_bin)       # Mean coherence of the bin
 
         return phase_coherence_max, max_phase_coherence, min_phase_coherence, mean_phase_coherence
 
@@ -1051,14 +1186,6 @@ class SARProcessor:
         vals = np.where(np.isfinite(vals), vals, np.nanmean(vals))
         vals -= vals.mean()
         ny, nx = vals.shape
-
-        # if detrend:
-        #     yy0, xx0 = np.mgrid[0:ny, 0:nx]
-        #     A = np.column_stack([np.ones(ny * nx, np.float32),
-        #                         yy0.ravel().astype(np.float32),
-        #                         xx0.ravel().astype(np.float32)])
-        #     coeffs, *_ = np.linalg.lstsq(A, vals.ravel(), rcond=None)
-        #     vals = vals - (A @ coeffs).reshape(ny, nx).astype(np.float32)
 
         if detrend:
             F_detrend = scipy.fft.fft2(vals, workers=-1)
@@ -1324,120 +1451,3 @@ class SARProcessor:
     # def retrieve_stability_from_psd(self):
 
     # def wind_retrieval(self):
-
-    ########### HELP: functions that can be used ################
-    # def calc_sigma0_cmod5_n(self, v, phi, theta):
-    #     """Calculates CMOD5n normalized radar backscatter (linear).
-
-    #     Parameters:
-    #         v: Wind speed [m/s] (>= 0)
-    #         phi: Relative wind direction [deg] (angle between azimuth and wind
-    #         direction)
-    #         theta: Incidence angle [deg]
-
-    #     Returns:
-    #         CMOD5_N: Normalized backscatter sigma0 (linear scale)
-    #     """
-
-    #     # 1-based indexing added to match Fortran C(1) .. C(28)
-    #     C = np.array(
-    #         [
-    #             0.0,  # Index 0 unused to maintain 1-based Fortran indexing
-    #             -0.6878,
-    #             -0.7957,
-    #             0.3380,
-    #             -0.1728,
-    #             0.0000,
-    #             0.0040,
-    #             0.1103,
-    #             0.0159,
-    #             6.7329,
-    #             2.7713,
-    #             -2.2885,
-    #             0.4971,
-    #             -0.7250,
-    #             0.0450,
-    #             0.0066,
-    #             0.3222,
-    #             0.0120,
-    #             22.7000,
-    #             2.0813,
-    #             3.0000,
-    #             8.3659,
-    #             -3.3428,
-    #             1.3236,
-    #             6.2437,
-    #             2.3893,
-    #             0.3249,
-    #             4.1590,
-    #             1.6930,
-    #         ]
-    #     )
-
-    #     DTOR = 57.29577951
-    #     THETM = 40.0
-    #     THETHR = 25.0
-    #     ZPOW = 1.6
-
-    #     Y0 = C[19]
-    #     PN = C[20]
-    #     A = C[19] - (C[19] - 1.0) / C[20]
-    #     B = 1.0 / (C[20] * (C[19] - 1.0) ** (3 - 1))
-
-    #     # Angles
-    #     FI = np.radians(phi)  # equivalent to phi / DTOR
-    #     CSFI = np.cos(FI)
-    #     CS2FI = 2.0 * CSFI * CSFI - 1.0
-
-    #     X = (theta - THETM) / THETHR
-    #     XX = X * X
-
-    #     # B0: Function of wind speed and incidence angle
-    #     A0 = C[1] + C[2] * X + C[3] * XX + C[4] * X * XX
-    #     A1 = C[5] + C[6] * X
-    #     A2 = C[7] + C[8] * X
-
-    #     GAM = C[9] + C[10] * X + C[11] * XX
-    #     S0 = C[12] + C[13] * X
-
-    #     S = A2 * v
-    #     A3 = 1.0 / (1.0 + np.exp(-np.maximum(S, S0)))
-
-    #     # Piecewise condition for S < S0
-    #     if np.ndim(S) > 0:
-    #         mask = S < S0
-    #         A3[mask] = A3[mask] * (S[mask] / S0[mask]) ** (
-    #             S0[mask] * (1.0 - A3[mask])
-    #         )
-    #     else:
-    #         if S < S0:
-    #             A3 = A3 * (S / S0) ** (S0 * (1.0 - A3))
-
-    #     B0 = (A3**GAM) * (10.0 ** (A0 + A1 * v))
-
-    #     # B1: Function of wind speed and incidence angle
-    #     B1 = C[15] * v * (0.5 + X - np.tanh(4.0 * (X + C[16] + C[17] * v)))
-    #     B1 = C[14] * (1.0 + X) - B1
-    #     B1 = B1 / (np.exp(0.34 * (v - C[18])) + 1.0)
-
-    #     # B2: Function of wind speed and incidence angle
-    #     V0 = C[21] + C[22] * X + C[23] * XX
-    #     D1 = C[24] + C[25] * X + C[26] * XX
-    #     D2 = C[27] + C[28] * X
-
-    #     V2 = (v / V0) + 1.0
-
-    #     # Piecewise condition for V2 < Y0
-    #     if np.ndim(V2) > 0:
-    #         mask2 = V2 < Y0
-    #         V2[mask2] = A + B * (V2[mask2] - 1.0) ** PN
-    #     else:
-    #         if V2 < Y0:
-    #             V2 = A + B * (V2 - 1.0) ** PN
-
-    #     B2 = (-D1 + D2 * V2) * np.exp(-V2)
-
-    #     # CMOD5_N: Combine the three Fourier terms
-    #     CMOD5_N = B0 * (1.0 + B1 * CSFI + B2 * CS2FI) ** ZPOW
-
-    #     return CMOD5_N
